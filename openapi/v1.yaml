@@ -1,0 +1,777 @@
+openapi: 3.1.0
+info:
+  title: TaskNotes Calendar API
+  version: 1.0.0
+  description:
+    Provider-neutral, read-only calendar connection contract. The first implementation supports
+    Google only.
+servers:
+  - url: https://calendar.tasknotes.example
+security: []
+tags:
+  - name: Health
+  - name: Sign-in
+  - name: Connections
+  - name: Calendar
+  - name: Account
+paths:
+  /health/live:
+    get:
+      operationId: healthLive
+      tags: [Health]
+      responses:
+        "200": { $ref: "#/components/responses/Health" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /health/ready:
+    get:
+      operationId: healthReady
+      tags: [Health]
+      responses:
+        "200": { $ref: "#/components/responses/Health" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/sign-in/start:
+    post:
+      operationId: signInStart
+      tags: [Sign-in]
+      x-max-body-bytes: 16384
+      requestBody: { $ref: "#/components/requestBodies/TransactionStart" }
+      responses:
+        "201": { $ref: "#/components/responses/TransactionStart" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/sign-in/{transaction_id}/status:
+    get:
+      operationId: signInStatus
+      tags: [Sign-in]
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+        - $ref: "#/components/parameters/PollingSecret"
+      responses:
+        "200": { $ref: "#/components/responses/TransactionStatus" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/sign-in/{transaction_id}/redeem:
+    post:
+      operationId: signInRedeem
+      tags: [Sign-in]
+      x-max-body-bytes: 16384
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      requestBody: { $ref: "#/components/requestBodies/TransactionRedeem" }
+      responses:
+        "200":
+          description: A one-time device session credential.
+          headers:
+            {
+              Cache-Control: { $ref: "#/components/headers/NoStore" },
+              X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+            }
+          content:
+            { application/json: { schema: { $ref: "#/components/schemas/SignInRedeemResponse" } } }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/connections/google/start:
+    post:
+      operationId: connectStart
+      tags: [Connections]
+      security: [{ bearerAuth: [] }]
+      x-max-body-bytes: 16384
+      requestBody: { $ref: "#/components/requestBodies/TransactionStart" }
+      responses:
+        "201": { $ref: "#/components/responses/TransactionStart" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/connections/google/{transaction_id}/status:
+    get:
+      operationId: connectStatus
+      tags: [Connections]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+        - $ref: "#/components/parameters/PollingSecret"
+      responses:
+        "200": { $ref: "#/components/responses/TransactionStatus" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/connections/google/{transaction_id}/redeem:
+    post:
+      operationId: connectRedeem
+      tags: [Connections]
+      security: [{ bearerAuth: [] }]
+      x-max-body-bytes: 16384
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      requestBody: { $ref: "#/components/requestBodies/TransactionRedeem" }
+      responses:
+        "200":
+          description: Connected calendar account.
+          headers:
+            {
+              Cache-Control: { $ref: "#/components/headers/NoStore" },
+              X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+            }
+          content:
+            { application/json: { schema: { $ref: "#/components/schemas/ConnectRedeemResponse" } } }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/session:
+    get:
+      operationId: session
+      tags: [Account]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Session" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/connections:
+    get:
+      operationId: connections
+      tags: [Connections]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Connections" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/connections/{connection_id}:
+    delete:
+      operationId: disconnect
+      tags: [Connections]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/ConnectionId"
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/calendars:
+    get:
+      operationId: calendars
+      tags: [Calendar]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Calendars" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/calendars/{calendar_id}/events:
+    get:
+      operationId: events
+      description:
+        Reads at most 250 events from one calendar and one provider page for a range no longer than
+        93 days.
+      tags: [Calendar]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CalendarId"
+        - {
+            name: start,
+            in: query,
+            required: true,
+            schema: { $ref: "#/components/schemas/Rfc3339Instant" },
+          }
+        - {
+            name: end,
+            in: query,
+            required: true,
+            schema: { $ref: "#/components/schemas/Rfc3339Instant" },
+          }
+        - {
+            name: cursor,
+            in: query,
+            required: false,
+            schema: { type: string, minLength: 16, maxLength: 2048 },
+          }
+      responses:
+        "200": { $ref: "#/components/responses/Events" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/devices:
+    get:
+      operationId: devices
+      tags: [Account]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200": { $ref: "#/components/responses/Devices" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/devices/{device_id}:
+    delete:
+      operationId: revokeDevice
+      tags: [Account]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DeviceId"
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/account:
+    delete:
+      operationId: deleteAccount
+      tags: [Account]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /oauth/google/callback:
+    get:
+      operationId: providerCallback
+      tags: [Connections]
+      description: OAuth provider redirect. Never returns a service credential or personal data.
+      parameters:
+        - {
+            name: state,
+            in: query,
+            required: true,
+            schema: { type: string, minLength: 16, maxLength: 1024 },
+          }
+        - {
+            name: code,
+            in: query,
+            required: false,
+            schema: { type: string, minLength: 16, maxLength: 1024 },
+          }
+        - {
+            name: error,
+            in: query,
+            required: false,
+            schema: { type: string, enum: [access_denied, temporarily_unavailable, server_error] },
+          }
+      responses:
+        "200":
+          description: Callback recorded; the initiating client must poll and redeem.
+          headers:
+            {
+              Cache-Control: { $ref: "#/components/headers/NoStore" },
+              X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+            }
+          content:
+            {
+              application/json:
+                {
+                  schema:
+                    {
+                      type: object,
+                      additionalProperties: false,
+                      required: [status],
+                      properties: { status: { const: complete } },
+                    },
+                },
+            }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "500": { $ref: "#/components/responses/InternalError" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  headers:
+    NoStore: { schema: { type: string, const: no-store } }
+    NoSniff: { schema: { type: string, const: nosniff } }
+    RetryAfter: { schema: { type: integer, minimum: 1, maximum: 300 } }
+  parameters:
+    TransactionId:
+      { name: transaction_id, in: path, required: true, schema: { type: string, format: uuid } }
+    ConnectionId:
+      { name: connection_id, in: path, required: true, schema: { type: string, format: uuid } }
+    CalendarId:
+      { name: calendar_id, in: path, required: true, schema: { type: string, format: uuid } }
+    DeviceId: { name: device_id, in: path, required: true, schema: { type: string, format: uuid } }
+    PollingSecret:
+      {
+        name: polling_secret,
+        in: query,
+        required: true,
+        schema: { type: string, minLength: 16, maxLength: 1024 },
+      }
+  requestBodies:
+    TransactionStart:
+      required: true
+      content:
+        { application/json: { schema: { $ref: "#/components/schemas/TransactionStartRequest" } } }
+    TransactionRedeem:
+      required: true
+      content:
+        { application/json: { schema: { $ref: "#/components/schemas/TransactionRedeemRequest" } } }
+  schemas:
+    Rfc3339Instant: { type: string, format: date-time }
+    ClientKind: { type: string, enum: [web, ios, android, obsidian] }
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          {
+            type: string,
+            enum:
+              [
+                invalid_request,
+                unsupported_media_type,
+                payload_too_large,
+                authentication_required,
+                permission_denied,
+                resource_not_found,
+                conflict,
+                rate_limited,
+                dependency_unavailable,
+                internal_error,
+              ],
+          }
+        message: { type: string, minLength: 1, maxLength: 160 }
+    TransactionStartRequest:
+      type: object
+      additionalProperties: false
+      required: [client_kind, device_name, code_challenge]
+      properties:
+        client_kind: { $ref: "#/components/schemas/ClientKind" }
+        device_name: { type: string, minLength: 1, maxLength: 80 }
+        code_challenge: { type: string, pattern: "^[A-Za-z0-9_-]{43,128}$" }
+    TransactionStartResponse:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, authorization_url, polling_secret, expires_at]
+      properties:
+        transaction_id: { type: string, format: uuid }
+        authorization_url: { type: string, format: uri, maxLength: 2048 }
+        polling_secret: { type: string, minLength: 16, maxLength: 1024 }
+        expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    TransactionRedeemRequest:
+      type: object
+      additionalProperties: false
+      required: [polling_secret, code_verifier]
+      properties:
+        polling_secret: { type: string, minLength: 16, maxLength: 1024 }
+        code_verifier: { type: string, pattern: "^[A-Za-z0-9._~-]{43,128}$" }
+    TransactionStatus:
+      oneOf:
+        - {
+            type: object,
+            additionalProperties: false,
+            required: [status, expires_at],
+            properties:
+              {
+                status: { const: pending },
+                expires_at: { $ref: "#/components/schemas/Rfc3339Instant" },
+              },
+          }
+        - {
+            type: object,
+            additionalProperties: false,
+            required: [status, expires_at],
+            properties:
+              {
+                status: { const: authorized },
+                expires_at: { $ref: "#/components/schemas/Rfc3339Instant" },
+              },
+          }
+        - {
+            type: object,
+            additionalProperties: false,
+            required: [status, failure_code],
+            properties:
+              {
+                status: { const: failed },
+                failure_code:
+                  { type: string, enum: [access_denied, identity_mismatch, authorization_failed] },
+              },
+          }
+        - {
+            type: object,
+            additionalProperties: false,
+            required: [status],
+            properties: { status: { const: expired } },
+          }
+    SessionCredential:
+      type: object
+      additionalProperties: false
+      required: [credential, session_id, idle_expires_at, absolute_expires_at]
+      properties:
+        credential: { type: string, minLength: 16, maxLength: 1024 }
+        session_id: { type: string, format: uuid }
+        idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    SignInRedeemResponse:
+      type: object
+      additionalProperties: false
+      required: [session]
+      properties: { session: { $ref: "#/components/schemas/SessionCredential" } }
+    ConnectRedeemResponse:
+      type: object
+      additionalProperties: false
+      required: [connection_id, status]
+      properties: { connection_id: { type: string, format: uuid }, status: { const: active } }
+    Session:
+      type: object
+      additionalProperties: false
+      required:
+        [
+          principal_id,
+          session_id,
+          client_kind,
+          device_name,
+          created_at,
+          idle_expires_at,
+          absolute_expires_at,
+        ]
+      properties:
+        principal_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        client_kind: { $ref: "#/components/schemas/ClientKind" }
+        device_name: { type: string, minLength: 1, maxLength: 80 }
+        created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    Connection:
+      type: object
+      additionalProperties: false
+      required: [id, provider, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string, const: google }
+        status: { type: string, enum: [active, reconnect_required] }
+        created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    Calendar:
+      type: object
+      additionalProperties: false
+      required: [id, connection_id, name, description, color, time_zone, is_primary]
+      properties:
+        id: { type: string, format: uuid }
+        connection_id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 500 }
+        description: { type: [string, "null"], maxLength: 4000 }
+        color: { type: [string, "null"], maxLength: 32 }
+        time_zone: { type: [string, "null"], maxLength: 100 }
+        is_primary: { type: boolean }
+    EventBoundary:
+      oneOf:
+        - {
+            type: object,
+            additionalProperties: false,
+            required: [kind, date],
+            properties: { kind: { const: date }, date: { type: string, format: date } },
+          }
+        - {
+            type: object,
+            additionalProperties: false,
+            required: [kind, date_time],
+            properties:
+              {
+                kind: { const: date_time },
+                date_time: { $ref: "#/components/schemas/Rfc3339Instant" },
+                time_zone: { type: string, minLength: 1, maxLength: 100 },
+              },
+          }
+    Event:
+      type: object
+      additionalProperties: false
+      required: [id, calendar_id, status, title, description, location, start, end, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        calendar_id: { type: string, format: uuid }
+        status: { type: string, enum: [confirmed, tentative, cancelled] }
+        title: { type: [string, "null"], maxLength: 1000 }
+        description: { type: [string, "null"], maxLength: 16000 }
+        location: { type: [string, "null"], maxLength: 1000 }
+        start: { $ref: "#/components/schemas/EventBoundary" }
+        end: { $ref: "#/components/schemas/EventBoundary" }
+        updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    Device:
+      type: object
+      additionalProperties: false
+      required: [id, client_kind, device_name, created_at, last_used_at, current]
+      properties:
+        id: { type: string, format: uuid }
+        client_kind: { $ref: "#/components/schemas/ClientKind" }
+        device_name: { type: string, minLength: 1, maxLength: 80 }
+        created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        last_used_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        current: { type: boolean }
+  responses:
+    Health:
+      description: Health status.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content:
+        {
+          application/json:
+            {
+              schema:
+                {
+                  type: object,
+                  additionalProperties: false,
+                  required: [status],
+                  properties: { status: { type: string, enum: [ok, ready] } },
+                },
+            },
+        }
+    TransactionStart:
+      description: Short-lived browser authorization transaction.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content:
+        { application/json: { schema: { $ref: "#/components/schemas/TransactionStartResponse" } } }
+    TransactionStatus:
+      description: Privacy-safe transaction status.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content: { application/json: { schema: { $ref: "#/components/schemas/TransactionStatus" } } }
+    Session:
+      description: Current device session.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } }
+    Connections:
+      description: Calendar connections. The first slice has at most one.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content:
+        {
+          application/json:
+            {
+              schema:
+                {
+                  type: object,
+                  additionalProperties: false,
+                  required: [connections],
+                  properties:
+                    {
+                      connections:
+                        {
+                          type: array,
+                          maxItems: 1,
+                          items: { $ref: "#/components/schemas/Connection" },
+                        },
+                    },
+                },
+            },
+        }
+    Calendars:
+      description: Server-owned calendar resources.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content:
+        {
+          application/json:
+            {
+              schema:
+                {
+                  type: object,
+                  additionalProperties: false,
+                  required: [calendars],
+                  properties:
+                    {
+                      calendars:
+                        {
+                          type: array,
+                          maxItems: 250,
+                          items: { $ref: "#/components/schemas/Calendar" },
+                        },
+                    },
+                },
+            },
+        }
+    Events:
+      description: One bounded normalized event page.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content:
+        {
+          application/json:
+            {
+              schema:
+                {
+                  type: object,
+                  additionalProperties: false,
+                  required: [events, next_cursor],
+                  properties:
+                    {
+                      events:
+                        {
+                          type: array,
+                          maxItems: 250,
+                          items: { $ref: "#/components/schemas/Event" },
+                        },
+                      next_cursor: { type: [string, "null"], minLength: 16, maxLength: 2048 },
+                    },
+                },
+            },
+        }
+    Devices:
+      description: Device sessions.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+      content:
+        {
+          application/json:
+            {
+              schema:
+                {
+                  type: object,
+                  additionalProperties: false,
+                  required: [devices],
+                  properties:
+                    {
+                      devices:
+                        {
+                          type: array,
+                          maxItems: 100,
+                          items: { $ref: "#/components/schemas/Device" },
+                        },
+                    },
+                },
+            },
+        }
+    NoContent:
+      description: Completed. No response body.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+        }
+    InvalidRequest: { $ref: "#/components/responses/Error400" }
+    UnsupportedMediaType: { $ref: "#/components/responses/Error415" }
+    PayloadTooLarge: { $ref: "#/components/responses/Error413" }
+    AuthenticationRequired: { $ref: "#/components/responses/Error401" }
+    NotFound: { $ref: "#/components/responses/Error404" }
+    Conflict: { $ref: "#/components/responses/Error409" }
+    InternalError: { $ref: "#/components/responses/Error500" }
+    Error400:
+      {
+        description: Request is invalid.,
+        headers:
+          {
+            Cache-Control: { $ref: "#/components/headers/NoStore" },
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          },
+        content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+      }
+    Error401:
+      {
+        description: Authentication is required.,
+        headers:
+          {
+            Cache-Control: { $ref: "#/components/headers/NoStore" },
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          },
+        content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+      }
+    Error404:
+      {
+        description: Resource is absent or unavailable to this principal.,
+        headers:
+          {
+            Cache-Control: { $ref: "#/components/headers/NoStore" },
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          },
+        content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+      }
+    Error409:
+      {
+        description: Request conflicts with current state.,
+        headers:
+          {
+            Cache-Control: { $ref: "#/components/headers/NoStore" },
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          },
+        content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+      }
+    Error413:
+      {
+        description: JSON body exceeds 16384 bytes.,
+        headers:
+          {
+            Cache-Control: { $ref: "#/components/headers/NoStore" },
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          },
+        content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+      }
+    Error415:
+      {
+        description: Content type is not application/json.,
+        headers:
+          {
+            Cache-Control: { $ref: "#/components/headers/NoStore" },
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          },
+        content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+      }
+    Error500:
+      {
+        description: Internal invariant failure.,
+        headers:
+          {
+            Cache-Control: { $ref: "#/components/headers/NoStore" },
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          },
+        content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+      }
+    RateLimited:
+      description: Rate limit reached.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          Retry-After: { $ref: "#/components/headers/RetryAfter" },
+        }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Unavailable:
+      description: A required dependency is temporarily unavailable.
+      headers:
+        {
+          Cache-Control: { $ref: "#/components/headers/NoStore" },
+          X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+          Retry-After: { $ref: "#/components/headers/RetryAfter" },
+        }
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
