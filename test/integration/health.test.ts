@@ -7,7 +7,7 @@ const testEnv = env as unknown as Env;
 
 describe("health endpoints", () => {
   it("reports liveness without consulting D1", async () => {
-    const response = await exports.default.fetch(new Request("https://calendar.test/health/live"));
+    const response = await exports.default.fetch(new Request("http://127.0.0.1:8787/health/live"));
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -17,14 +17,14 @@ describe("health endpoints", () => {
   it("reports readiness when D1 is available", async () => {
     await expect(testEnv.DB.prepare("SELECT 1 AS ready").first()).resolves.toEqual({ ready: 1 });
 
-    const response = await exports.default.fetch(new Request("https://calendar.test/health/ready"));
+    const response = await exports.default.fetch(new Request("http://127.0.0.1:8787/health/ready"));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ status: "ready" });
   });
 
   it("returns a stable private not-found response", async () => {
-    const response = await exports.default.fetch(new Request("https://calendar.test/not-found"));
+    const response = await exports.default.fetch(new Request("http://127.0.0.1:8787/not-found"));
 
     expect(response.status).toBe(404);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
