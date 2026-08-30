@@ -8,6 +8,19 @@ discovery, and bounded event reads.
 
 The service is under active design and is not ready for real credentials or production use.
 
+## Local verification
+
+Requires Node 22 and pnpm 11.15.1.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm migrations:local
+pnpm verify
+```
+
+Tests run inside the Workers runtime with an isolated D1 database and do not require live Google
+credentials.
+
 See:
 
 - [`PRODUCT.md`](PRODUCT.md)
