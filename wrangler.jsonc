@@ -29,7 +29,7 @@
   "env": {
     "lab": {
       "name": "tasknotes-calendar-lab",
-      "workers_dev": true,
+      "workers_dev": false,
       "observability": {
         "enabled": false,
       },

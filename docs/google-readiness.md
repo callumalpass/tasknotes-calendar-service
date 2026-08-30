@@ -1,9 +1,9 @@
 # Google provider readiness checklist
 
 Implementation and fake-provider tests may proceed without live credentials. An isolated LAB Worker
-and empty D1 database are deployed at `https://tasknotes-calendar-lab.callumalpass.workers.dev`, but
-its Google client remains deliberately set to a pending value. Real Google testing is blocked until
-a human-controlled Google Cloud project provides:
+and empty D1 database are deployed for `https://tasknotes-calendar-lab.callumalpass.workers.dev`,
+but its public trigger is disabled and Google client remains deliberately pending between acceptance
+runs. Real Google testing is blocked until a human-controlled Google Cloud project provides:
 
 - a Web application OAuth client dedicated to LAB;
 - the exact callback URI

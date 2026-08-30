@@ -34,10 +34,10 @@ returned only inside authenticated, expiring cursors.
 
 ## Isolated LAB
 
-The non-production Worker is available at `https://tasknotes-calendar-lab.callumalpass.workers.dev`.
-Its dedicated D1 database is empty and all migrations are applied. Liveness and readiness are public
-only as private, non-cacheable health responses; application routes still require service
-authentication.
+The non-production Worker reserves `https://tasknotes-calendar-lab.callumalpass.workers.dev`. Its
+dedicated D1 database is empty and all migrations are applied. The public `workers.dev` trigger is
+intentionally disabled between acceptance runs so anonymous OAuth-start traffic cannot write to D1
+while the Google client is pending.
 
 Real Google acceptance remains disabled while `GOOGLE_CLIENT_ID` is the explicit pending value. The
 Google Web OAuth client must register this exact redirect URI:
@@ -52,7 +52,8 @@ Install the client secret interactively rather than writing it to a file or shel
 pnpm exec wrangler secret put GOOGLE_CLIENT_SECRET --env lab
 ```
 
-After putting the public client ID in the LAB vars, verify and deploy deliberately:
+After putting the public client ID in the LAB vars, installing the client secret, and explicitly
+re-enabling the LAB `workers_dev` trigger, verify and deploy deliberately:
 
 ```bash
 pnpm migrations:lab:list
