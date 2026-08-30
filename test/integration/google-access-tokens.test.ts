@@ -266,7 +266,7 @@ describe("GoogleAccessTokens with real D1", () => {
         value: { accessToken: "unsafe", expiresInSeconds: 500, scope },
       }),
     });
-    await expectCode(tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!), "internal");
+    await expectCode(tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!), "unavailable");
     expect(await testEnv.DB.prepare("SELECT refresh_lease_owner FROM connections").first()).toEqual(
       { refresh_lease_owner: null },
     );
@@ -284,6 +284,7 @@ describe("GoogleAccessTokens with real D1", () => {
     expect(await testEnv.DB.prepare("SELECT status FROM connections").first()).toEqual({
       status: "reconnect_required",
     });
+    await expectCode(tokens.loadForPrincipal(PRINCIPAL), "reconnect");
   });
 
   it.each([

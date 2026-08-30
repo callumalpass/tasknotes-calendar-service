@@ -291,7 +291,11 @@ export class GoogleAccessTokens {
         )
         .bind(principalId)
         .first();
-      if (value === null) return null;
+      if (value === null) {
+        const current = await this.#current(principalId);
+        if (current?.status === "reconnect_required") return failure("reconnect");
+        return null;
+      }
       const row = parseRow(value);
       const payload = await this.#decrypt(row);
       const snapshot = Object.freeze({
@@ -582,7 +586,7 @@ export class GoogleAccessTokens {
           : returnedScopes(refreshed.scope);
     } catch {
       await this.#release(row, owner);
-      return failure("internal");
+      return failure("unavailable");
     }
     const committedAt = this.#now();
     const nextPayload: TokenPayload = {
