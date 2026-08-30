@@ -20,6 +20,8 @@ import type {
 
 const NOW = 2_000_000_000;
 const KID = "fixture-key-1";
+const NONCE = "transaction-nonce";
+const NONCE_HASH = "cOkxTHbZOikKdhfVbLdzHLLr4ubBUOTkYe3fZa_sxN4";
 const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const endpoints: GoogleOidcEndpoints = googleOidcTestEndpoints({
   authorizationEndpoint: "http://127.0.0.1:9797/authorize",
@@ -33,7 +35,7 @@ const client: GoogleOidcClient = {
 const exchangeInput: GoogleTokenExchangeInput = {
   code: "one-time-code",
   codeVerifier: "a".repeat(64),
-  expectedNonce: "transaction-nonce",
+  expectedNonceHash: NONCE_HASH,
 };
 
 let privateKey: CryptoKey;
@@ -50,7 +52,7 @@ function claims(overrides: Partial<JWTPayload> = {}): JWTPayload {
     iss: "https://accounts.google.com",
     sub: "google-subject-123",
     aud: client.clientId,
-    nonce: exchangeInput.expectedNonce,
+    nonce: NONCE,
     iat: NOW - 10,
     exp: NOW + 3_590,
     email: "display@example.test",
@@ -291,6 +293,38 @@ describe("Google code exchange and ID token verification", () => {
       "invalid_id_token",
     );
   });
+
+  it("rejects a replayed nonce digest from another transaction", async () => {
+    await expectCode(
+      exchangeGoogleSignInCode(
+        endpoints,
+        client,
+        {
+          ...exchangeInput,
+          expectedNonceHash: "2QVIx5mr1AYSE5odZn04x_kkSz642jhx9tjuwxNRrNc",
+        },
+        dependencies(jsonResponse(await tokenPayload())),
+      ),
+      "invalid_id_token",
+    );
+  });
+
+  it.each(["", "not-base64url!", "A".repeat(42), "A".repeat(44), `${NONCE_HASH}=`])(
+    "rejects a malformed expected nonce digest before provider exchange: %s",
+    async (digest) => {
+      const deps = dependencies(jsonResponse(await tokenPayload()));
+      await expectCode(
+        exchangeGoogleSignInCode(
+          endpoints,
+          client,
+          { ...exchangeInput, expectedNonceHash: digest },
+          deps,
+        ),
+        "invalid_request",
+      );
+      expect(deps.fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("accepts a multi-audience token only with the exact authorized party", async () => {
     const idToken = await signedToken(

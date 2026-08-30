@@ -1,6 +1,9 @@
 import { decodeProtectedHeader, jwtVerify } from "jose";
 import type { JWTVerifyGetKey, JWTPayload } from "jose";
 
+import { decodeBase64Url } from "../crypto/base64url";
+import { constantTimeEqual, sha256 } from "../crypto/digest";
+
 const endpointConfigurationBrand = Symbol("GoogleOidcEndpointConfiguration");
 const CANONICAL_ISSUER = "https://accounts.google.com";
 const PRODUCTION_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -62,7 +65,7 @@ export interface GoogleCalendarAuthorizationInput extends GoogleAuthorizationInp
 export interface GoogleTokenExchangeInput {
   readonly code: string;
   readonly codeVerifier: string;
-  readonly expectedNonce: string;
+  readonly expectedNonceHash: string;
 }
 
 export interface GoogleCalendarTokenExchangeInput extends GoogleTokenExchangeInput {
@@ -400,7 +403,11 @@ async function exchangeCode(
   validateRedirectUri(client.redirectUri, configured.mode);
   assertBoundedAscii(input.code, MAX_TOKEN_BYTES);
   if (!PKCE_VERIFIER.test(input.codeVerifier)) fail("invalid_request");
-  assertBoundedAscii(input.expectedNonce);
+  try {
+    decodeBase64Url(input.expectedNonceHash, { minBytes: 32, maxBytes: 32 });
+  } catch {
+    fail("invalid_request");
+  }
   const tokenEndpoint = new URL(configured.tokenEndpoint);
   const timeout = dependencies.timeoutMilliseconds ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000) fail("invalid_request");
@@ -475,7 +482,7 @@ function validateAudience(payload: JWTPayload, clientId: string): void {
 
 async function verifyIdentity(
   idToken: string,
-  expectedNonce: string,
+  expectedNonceHash: string,
   clientId: string,
   dependencies: GoogleOidcDependencies,
 ): Promise<GoogleIdentity> {
@@ -506,7 +513,8 @@ async function verifyIdentity(
     const issuer = boundedClaim(payload.iss, true);
     if (issuer === undefined || !ACCEPTED_ISSUERS.has(issuer)) fail("invalid_id_token");
     validateAudience(payload, clientId);
-    if (boundedClaim(payload["nonce"], true) !== expectedNonce) fail("invalid_id_token");
+    const nonce = boundedClaim(payload["nonce"], true);
+    if (nonce === undefined) fail("invalid_id_token");
     const subject = boundedClaim(payload.sub, true);
     if (subject === undefined) fail("invalid_id_token");
     const issuedAt = integerClaim(payload.iat);
@@ -525,6 +533,12 @@ async function verifyIdentity(
     const name = boundedClaim(payload["name"], false);
     const emailVerified = payload["email_verified"];
     if (emailVerified !== undefined && typeof emailVerified !== "boolean") fail("invalid_id_token");
+    const expectedNonceDigest = decodeBase64Url(expectedNonceHash, {
+      minBytes: 32,
+      maxBytes: 32,
+    });
+    const nonceDigest = await sha256(textEncoder.encode(nonce));
+    if (!constantTimeEqual(nonceDigest, expectedNonceDigest)) fail("invalid_id_token");
     return {
       issuer: CANONICAL_ISSUER,
       subject,
@@ -546,7 +560,7 @@ export async function exchangeGoogleSignInCode(
 ): Promise<GoogleIdentity> {
   const tokens = await exchangeCode(endpoints, client, input, dependencies);
   validatedGrantedScopes(tokens.scopes, []);
-  return verifyIdentity(tokens.idToken, input.expectedNonce, client.clientId, dependencies);
+  return verifyIdentity(tokens.idToken, input.expectedNonceHash, client.clientId, dependencies);
 }
 
 export async function exchangeGoogleCalendarCode(
@@ -560,7 +574,7 @@ export async function exchangeGoogleCalendarCode(
   const tokens = await exchangeCode(endpoints, client, input, dependencies);
   const identity = await verifyIdentity(
     tokens.idToken,
-    input.expectedNonce,
+    input.expectedNonceHash,
     client.clientId,
     dependencies,
   );
