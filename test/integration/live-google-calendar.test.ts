@@ -90,6 +90,7 @@ async function insertConnection(
     generation?: number;
     tokenVersion?: number;
     expiresAt?: number;
+    authorityTimestamp?: number;
   } = {},
 ): Promise<void> {
   const principalId = options.principalId ?? PRINCIPAL;
@@ -98,6 +99,7 @@ async function insertConnection(
   const generation = options.generation ?? 1;
   const tokenVersion = options.tokenVersion ?? 1;
   const current = await databaseNow();
+  const authorityTimestamp = options.authorityTimestamp ?? current;
   const payload: TokenPayload = {
     accessToken: `access-canary-${generation}-${tokenVersion}`,
     refreshToken: `refresh-canary-${generation}-${tokenVersion}`,
@@ -123,8 +125,8 @@ async function insertConnection(
     `INSERT INTO connections
        (id, principal_id, identity_id, provider, status, generation,
         envelope_schema_version, key_version, dek_iv, wrapped_dek, payload_iv, ciphertext,
-        token_version, created_at, updated_at)
-     VALUES (?, ?, ?, 'google', 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        token_version, created_at, updated_at, last_provider_success_at)
+     VALUES (?, ?, ?, 'google', 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       connectionId,
@@ -139,14 +141,22 @@ async function insertConnection(
       row.ciphertext,
       tokenVersion,
       current,
-      current,
+      authorityTimestamp,
+      options.authorityTimestamp ?? null,
     )
     .run();
 }
 
-async function seed(options: { expiresAt?: number; calendar?: boolean } = {}): Promise<void> {
+async function seed(
+  options: { expiresAt?: number; calendar?: boolean; authorityTimestamp?: number } = {},
+): Promise<void> {
   await insertPrincipal();
-  await insertConnection(options.expiresAt === undefined ? {} : { expiresAt: options.expiresAt });
+  await insertConnection({
+    ...(options.expiresAt === undefined ? {} : { expiresAt: options.expiresAt }),
+    ...(options.authorityTimestamp === undefined
+      ? {}
+      : { authorityTimestamp: options.authorityTimestamp }),
+  });
   if (options.calendar === true) await insertCalendar();
 }
 
@@ -556,6 +566,40 @@ describe("LiveGoogleCalendar with real D1", () => {
       count: 250,
     });
   });
+
+  it.each([0, 250] as const)(
+    "commits %i mappings when provider-success and update timestamps remain equal",
+    async (count) => {
+      const futureTimestamp = (await databaseNow()) + 60;
+      await seed({ authorityTimestamp: futureTimestamp });
+      const items = Array.from({ length: count }, (_, index) => ({
+        id: `same-second-provider-${index}`,
+        summary: `Same second ${index}`,
+        accessRole: "reader",
+      }));
+      const providerState = state({ calendarResponses: [json({ items })] });
+
+      const result = await service(providerState).listCalendars(PRINCIPAL);
+      expect(result.calendars).toHaveLength(count);
+      expect(providerState.calendarCalls).toBe(1);
+      expect(await testEnv.DB.prepare("SELECT COUNT(*) AS count FROM calendars").first()).toEqual({
+        count,
+      });
+      expect(
+        await testEnv.DB.prepare(
+          `SELECT discovery_version, discovery_lease_owner, updated_at,
+                  last_provider_success_at FROM connections WHERE id = ?`,
+        )
+          .bind(CONNECTION)
+          .first(),
+      ).toEqual({
+        discovery_version: 1,
+        discovery_lease_owner: null,
+        updated_at: futureTimestamp,
+        last_provider_success_at: futureTimestamp,
+      });
+    },
+  );
 
   it.each(["before", "after", "expired-after", "delete-after"] as const)(
     "resolves ambiguous discovery acquisition %s without an unauthorized provider call",
