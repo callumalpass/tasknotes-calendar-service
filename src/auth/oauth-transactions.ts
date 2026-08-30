@@ -956,7 +956,9 @@ export class OAuthTransactions {
                envelope_schema_version = ?, key_version = ?, dek_iv = ?, wrapped_dek = ?,
                payload_iv = ?, ciphertext = ?, refresh_lease_owner = NULL,
                refresh_lease_until = NULL, refresh_lease_generation = NULL,
-               refresh_lease_token_version = NULL, updated_at = ?, last_provider_success_at = ?
+               refresh_lease_token_version = NULL, discovery_lease_owner = NULL,
+               discovery_lease_until = NULL, discovery_lease_generation = NULL,
+               discovery_lease_token_version = NULL, updated_at = ?, last_provider_success_at = ?
              WHERE id = ? AND principal_id = ? AND identity_id = ? AND provider = 'google'
                AND generation = ? AND token_version = ? AND ${eligibility}
                AND EXISTS (SELECT 1 FROM principals WHERE id = ? AND google_connection_generation = ?)`,

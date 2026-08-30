@@ -169,6 +169,77 @@ describe("Worker HTTP security boundaries", () => {
     ).toBe(404);
   });
 
+  it("rejects tenant calendar substitution and invalid cursors before provider calls", async () => {
+    await configure({
+      calendarEnabled: true,
+      calendarPages: [
+        {
+          items: [
+            {
+              id: "security-private-calendar",
+              summary: "Security calendar",
+              accessRole: "owner",
+              primary: true,
+            },
+          ],
+        },
+      ],
+      eventPages: [
+        {
+          calendarId: "security-private-calendar",
+          nextPageToken: "security-next-page",
+          items: [],
+        },
+        { calendarId: "security-private-calendar", items: [] },
+      ],
+    });
+    const owner = await signIn("calendar-security-owner");
+    const connection = await connect(owner.credential);
+    const discovery = await api("/v1/calendars", {}, owner.credential);
+    expect(discovery.status).toBe(200);
+    const calendarId = (await discovery.json<{ calendars: { id: string }[] }>()).calendars[0]?.id;
+    if (calendarId === undefined) throw new Error("expected discovered calendar");
+
+    const other = await signIn("calendar-security-other");
+    const range = "start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z";
+    const beforeSubstitution = (await statistics()).eventCalls;
+    expect(
+      (await api(`/v1/calendars/${calendarId}/events?${range}`, {}, other.credential)).status,
+    ).toBe(404);
+    expect((await statistics()).eventCalls).toBe(beforeSubstitution);
+
+    const first = await api(`/v1/calendars/${calendarId}/events?${range}`, {}, owner.credential);
+    expect(first.status).toBe(200);
+    const cursor = (await first.json<{ next_cursor: string }>()).next_cursor;
+    const callsAfterFirst = (await statistics()).eventCalls;
+    const tampered = `${cursor.slice(0, -1)}${cursor.endsWith("A") ? "B" : "A"}`;
+    expect(
+      (
+        await api(
+          `/v1/calendars/${calendarId}/events?${range}&cursor=${encodeURIComponent(tampered)}`,
+          {},
+          owner.credential,
+        )
+      ).status,
+    ).toBe(400);
+    expect((await statistics()).eventCalls).toBe(callsAfterFirst);
+
+    expect(
+      (await api(`/v1/connections/${connection.id}`, { method: "DELETE" }, owner.credential))
+        .status,
+    ).toBe(204);
+    expect(
+      (
+        await api(
+          `/v1/calendars/${calendarId}/events?${range}&cursor=${encodeURIComponent(cursor)}`,
+          {},
+          owner.credential,
+        )
+      ).status,
+    ).toBe(404);
+    expect((await statistics()).eventCalls).toBe(callsAfterFirst);
+  });
+
   it("contains cross-tenant locators and stale consent callbacks after disconnect", async () => {
     const owner = await signIn("authority-owner");
     const connected = await connect(owner.credential);

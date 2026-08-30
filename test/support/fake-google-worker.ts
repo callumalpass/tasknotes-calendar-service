@@ -103,6 +103,7 @@ interface FakeGoogleConfiguration {
   refresh?: FakeRefreshMode;
   calendar?: FakeCalendarMode;
   calendarEnabled?: boolean;
+  calendarDelayMs?: number;
   subject?: string;
   email?: string;
   calendarPages?: FakeCalendarPage[];
@@ -114,6 +115,7 @@ interface ActiveConfiguration {
   refresh: FakeRefreshMode;
   calendar: FakeCalendarMode;
   calendarEnabled: boolean;
+  calendarDelayMs: number;
   subject: string;
   email: string;
   calendarPages: FakeCalendarPage[];
@@ -163,6 +165,7 @@ function reset(): void {
     refresh: "success",
     calendar: "success",
     calendarEnabled: false,
+    calendarDelayMs: 0,
     subject: "fake-google-subject-001",
     email: "fake.user@example.test",
     calendarPages: [
@@ -616,7 +619,7 @@ function calendarFault(mode: FakeCalendarMode): Response | undefined {
   return fault(mode, { items: "not-an-array" });
 }
 
-function calendar(request: Request, url: URL): Response {
+async function calendar(request: Request, url: URL): Promise<Response> {
   if (!configuration.calendarEnabled) return reject(404);
   if (request.method !== "GET") return reject(405);
   if (!authorizedCalendarRequest(request)) return reject(401);
@@ -638,6 +641,9 @@ function calendar(request: Request, url: URL): Response {
     if (page === undefined) return reject(400);
     stats.calendarCalls += 1;
     stats.calendarListCalls += 1;
+    // An explicit deterministic delay lets concurrency tests overlap as real network requests do.
+    if (configuration.calendarDelayMs > 0)
+      await new Promise((resolve) => setTimeout(resolve, configuration.calendarDelayMs));
     const mode = configuration.calendar;
     configuration.calendar = "success";
     return calendarFault(mode) ?? json(page);
@@ -799,6 +805,7 @@ function validConfiguration(value: unknown): value is FakeGoogleConfiguration {
       "refresh",
       "calendar",
       "calendarEnabled",
+      "calendarDelayMs",
       "subject",
       "email",
       "calendarPages",
@@ -861,6 +868,10 @@ function validConfiguration(value: unknown): value is FakeGoogleConfiguration {
     (value["calendar"] === undefined ||
       calendarModes.includes(value["calendar"] as FakeCalendarMode)) &&
     (value["calendarEnabled"] === undefined || typeof value["calendarEnabled"] === "boolean") &&
+    (value["calendarDelayMs"] === undefined ||
+      (Number.isSafeInteger(value["calendarDelayMs"]) &&
+        (value["calendarDelayMs"] as number) >= 0 &&
+        (value["calendarDelayMs"] as number) <= 5_000)) &&
     (value["subject"] === undefined ||
       (typeof value["subject"] === "string" && bounded(value["subject"], 255))) &&
     (value["email"] === undefined ||

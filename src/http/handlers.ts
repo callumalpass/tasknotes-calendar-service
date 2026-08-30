@@ -1,4 +1,6 @@
 import { OAuthTransactionError, type OAuthTransactions } from "../auth/oauth-transactions";
+import { LiveGoogleCalendarError } from "../calendar/live-google-calendar";
+import type { EventsQuery } from "../contracts";
 import type { ProviderCallbackQuery, TransactionStartRequest } from "../contracts/transactions";
 import { decryptTokenEnvelope } from "../crypto/token-envelope";
 import type { Env } from "../env";
@@ -58,6 +60,23 @@ async function oauth(
       if (error.code === "invalid_request") throw new ContractError("invalid_request");
       if (error.code === "not_found") throw new ContractError("resource_not_found");
       if (error.code === "conflict") throw new ContractError("conflict");
+    }
+    throw error;
+  }
+}
+
+async function calendar(operation: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof LiveGoogleCalendarError) {
+      if (error.code === "invalid_request") throw new ContractError("invalid_request");
+      if (error.code === "not_found") throw new ContractError("resource_not_found");
+      if (error.code === "reconnect" || error.code === "conflict")
+        throw new ContractError("conflict");
+      if (error.code === "rate") throw new ContractError("rate_limited", error.retryAfterSeconds);
+      if (error.code === "unavailable")
+        throw new ContractError("dependency_unavailable", error.retryAfterSeconds);
     }
     throw error;
   }
@@ -223,13 +242,21 @@ export function createHandlers(env: Env): RouteHandlers {
       }
       return undefined;
     },
-    calendars: async () => {
-      await configured;
-      throw new ContractError("dependency_unavailable");
+    calendars: async (input) => {
+      const runtime = await configured;
+      return calendar(() =>
+        runtime.liveGoogleCalendar.listCalendars(authenticated(input).principalId),
+      );
     },
-    events: async () => {
-      await configured;
-      throw new ContractError("dependency_unavailable");
+    events: async (input) => {
+      const runtime = await configured;
+      return calendar(() =>
+        runtime.liveGoogleCalendar.listEvents(
+          authenticated(input).principalId,
+          input.params["calendar_id"] ?? "",
+          input.query as EventsQuery,
+        ),
+      );
     },
     devices: async (input) => {
       const runtime = await configured;

@@ -210,26 +210,42 @@ describe("Worker HTTP OAuth and account slice", () => {
       expect(persisted).not.toContain(secret ?? "impossible-null-secret");
     }
 
+    await bindings.DB.prepare(
+      `UPDATE connections SET discovery_lease_owner = 'replacement-race-owner',
+         discovery_lease_until = unixepoch() + 45,
+         discovery_lease_generation = generation,
+         discovery_lease_token_version = token_version, updated_at = unixepoch()
+       WHERE id = ?`,
+    )
+      .bind(first.id)
+      .run();
     const second = await connect(signedIn.credential);
     expect(second.id).toBe(first.id);
     expect(
-      await bindings.DB.prepare("SELECT generation, token_version FROM connections WHERE id = ?")
+      await bindings.DB.prepare(
+        `SELECT generation, token_version, discovery_lease_owner
+         FROM connections WHERE id = ?`,
+      )
         .bind(first.id)
         .first(),
-    ).toEqual({ generation: 2, token_version: 2 });
+    ).toEqual({ generation: 2, token_version: 2, discovery_lease_owner: null });
     const listed = await api("/v1/connections", {}, signedIn.credential);
     await expect(listed.json()).resolves.toMatchObject({
       connections: [{ id: first.id, provider: "google", status: "active" }],
     });
 
-    for (const path of [
-      "/v1/calendars",
-      `/v1/calendars/550e8400-e29b-41d4-a716-446655440000/events?start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z`,
-    ]) {
-      const response = await api(path, {}, signedIn.credential);
-      expect(response.status).toBe(503);
-      await expect(response.json()).resolves.toMatchObject({ code: "dependency_unavailable" });
-    }
+    const unavailableCalendars = await api("/v1/calendars", {}, signedIn.credential);
+    expect(unavailableCalendars.status).toBe(503);
+    await expect(unavailableCalendars.json()).resolves.toMatchObject({
+      code: "dependency_unavailable",
+    });
+    const unknownCalendar = await api(
+      "/v1/calendars/550e8400-e29b-41d4-a716-446655440000/events?start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z",
+      {},
+      signedIn.credential,
+    );
+    expect(unknownCalendar.status).toBe(404);
+    await expect(unknownCalendar.json()).resolves.toMatchObject({ code: "resource_not_found" });
     expect((await stats()).calendarCalls).toBe(0);
 
     const disconnected = await api(
@@ -322,6 +338,133 @@ describe("Worker HTTP OAuth and account slice", () => {
     );
     expect(redemptions.filter((response) => response.status === 200)).toHaveLength(1);
     expect(redemptions.filter((response) => response.status === 409)).toHaveLength(19);
+  });
+
+  it("discovers once concurrently and reads uncached normalized event pages", async () => {
+    await configure({
+      calendarEnabled: true,
+      calendarDelayMs: 1_500,
+      calendarPages: [
+        {
+          items: [
+            {
+              id: "private-provider-calendar-id",
+              summary: "Work",
+              description: "Current schedule",
+              timeZone: "Europe/London",
+              accessRole: "owner",
+              primary: true,
+            },
+            {
+              id: "private-provider-calendar-deleted",
+              summary: "Temporary",
+              accessRole: "reader",
+            },
+          ],
+        },
+      ],
+      eventPages: [
+        {
+          calendarId: "private-provider-calendar-id",
+          nextPageToken: "second-page",
+          items: [
+            {
+              id: "private-event-id",
+              status: "confirmed",
+              updated: "2026-01-01T10:00:00Z",
+              summary: "Timed",
+              start: { dateTime: "2026-01-02T10:00:00Z" },
+              end: { dateTime: "2026-01-02T11:00:00Z" },
+            },
+            {
+              id: "private-all-day-id",
+              status: "confirmed",
+              updated: "2026-01-01T10:00:00Z",
+              start: { date: "2026-01-03" },
+              end: { date: "2026-01-04" },
+            },
+          ],
+        },
+        {
+          calendarId: "private-provider-calendar-id",
+          items: [
+            {
+              id: "private-tombstone-id",
+              status: "cancelled",
+              updated: "2026-01-02T10:00:00Z",
+              recurringEventId: "private-series-id",
+              originalStartTime: { dateTime: "2026-01-04T10:00:00Z" },
+            },
+          ],
+        },
+      ],
+    });
+    const signedIn = await signIn("Live calendar");
+    await connect(signedIn.credential);
+    const discoveries = await Promise.all(
+      Array.from({ length: 20 }, () => api("/v1/calendars", {}, signedIn.credential)),
+    );
+    expect(discoveries.every((response) => response.status === 200)).toBe(true);
+    const calendars = await discoveries[0]?.json<{
+      calendars: { id: string; name: string; color: null }[];
+    }>();
+    expect(calendars?.calendars).toHaveLength(2);
+    const discoveredWork = calendars?.calendars.find((calendar) => calendar.name === "Work");
+    expect(discoveredWork).toMatchObject({ name: "Work", color: null });
+    expect((await stats()).calendarListCalls).toBe(1);
+
+    await configure({
+      calendarDelayMs: 0,
+      calendarPages: [
+        {
+          items: [
+            {
+              id: "private-provider-calendar-id",
+              summary: "Work renamed",
+              description: "Updated schedule",
+              timeZone: "Europe/London",
+              accessRole: "owner",
+              primary: true,
+            },
+          ],
+        },
+      ],
+    });
+    const rediscovered = await api("/v1/calendars", {}, signedIn.credential);
+    expect(rediscovered.status).toBe(200);
+    const rediscoveredValue = await rediscovered.json<{
+      calendars: { id: string; name: string }[];
+    }>();
+    expect(rediscoveredValue.calendars).toEqual([
+      { ...rediscoveredValue.calendars[0], id: discoveredWork?.id, name: "Work renamed" },
+    ]);
+    expect((await stats()).calendarListCalls).toBe(2);
+
+    const publicId = discoveredWork?.id ?? "missing";
+    const range = "start=2026-01-01T00%3A00%3A00Z&end=2026-02-01T00%3A00%3A00Z";
+    await configure({ calendar: "unauthorized" });
+    const first = await api(`/v1/calendars/${publicId}/events?${range}`, {}, signedIn.credential);
+    expect(first.status).toBe(200);
+    expect(await stats()).toMatchObject({ refreshRequests: 1, eventCalls: 2 });
+    expect(await bindings.DB.prepare("SELECT token_version FROM connections").first()).toEqual({
+      token_version: 2,
+    });
+    const firstPage = await first.json<{ events: unknown[]; next_cursor: string }>();
+    expect(firstPage.events).toHaveLength(2);
+    expect(JSON.stringify(firstPage)).not.toContain("private-");
+    const second = await api(
+      `/v1/calendars/${publicId}/events?${range}&cursor=${encodeURIComponent(firstPage.next_cursor)}`,
+      {},
+      signedIn.credential,
+    );
+    expect(second.status).toBe(200);
+    const secondPage = await second.json<{ events: unknown[]; next_cursor: null }>();
+    expect(secondPage.events).toHaveLength(1);
+    expect(secondPage.next_cursor).toBeNull();
+    expect(JSON.stringify(secondPage)).not.toContain("private-");
+    expect(
+      await bindings.DB.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%event%'").all(),
+    ).toMatchObject({ results: [] });
   });
 
   it("lists and principal-binds devices, then account deletion invalidates the credential", async () => {

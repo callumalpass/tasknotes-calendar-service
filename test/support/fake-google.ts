@@ -98,6 +98,7 @@ export interface FakeGoogleConfiguration {
   refresh?: FakeRefreshMode;
   calendar?: FakeCalendarMode;
   calendarEnabled?: boolean;
+  calendarDelayMs?: number;
   subject?: string;
   email?: string;
   calendarPages?: FakeCalendarPage[];

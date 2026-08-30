@@ -104,6 +104,7 @@ CREATE TABLE connections (
   discovery_lease_until INTEGER,
   discovery_lease_generation INTEGER,
   discovery_lease_token_version INTEGER,
+  discovery_version INTEGER NOT NULL DEFAULT 0 CHECK (discovery_version >= 0),
   created_at INTEGER NOT NULL CHECK (created_at >= 0),
   updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
   last_provider_success_at INTEGER CHECK (
@@ -194,6 +195,24 @@ BEFORE UPDATE ON connections
 FOR EACH ROW
 WHEN NEW.created_at IS NOT OLD.created_at
   OR NEW.updated_at < OLD.updated_at
+  OR (
+    NEW.discovery_version IS NOT OLD.discovery_version
+    AND NOT (
+      NEW.discovery_version = OLD.discovery_version + 1
+      AND OLD.discovery_lease_owner IS NOT NULL
+      AND OLD.discovery_lease_generation IS OLD.generation
+      AND OLD.discovery_lease_token_version IS OLD.token_version
+      AND NEW.discovery_lease_owner IS NULL
+      AND NEW.discovery_lease_until IS NULL
+      AND NEW.discovery_lease_generation IS NULL
+      AND NEW.discovery_lease_token_version IS NULL
+      AND NEW.status = 'active' AND OLD.status = 'active'
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.last_provider_success_at IS NOT NULL
+      AND NEW.last_provider_success_at = NEW.updated_at
+    )
+  )
   OR (OLD.last_provider_success_at IS NOT NULL
     AND (NEW.last_provider_success_at IS NULL
       OR NEW.last_provider_success_at < OLD.last_provider_success_at))
@@ -325,9 +344,18 @@ WHEN NEW.created_at IS NOT OLD.created_at
       AND NEW.refresh_lease_token_version IS OLD.refresh_lease_token_version
     )
     OR
-    -- Calendar discovery lease release.
+    -- Calendar discovery lease release or authoritative complete-page commit.
     (
-      NEW.last_provider_success_at IS OLD.last_provider_success_at
+      (
+        NEW.last_provider_success_at IS OLD.last_provider_success_at
+        OR (
+          NEW.last_provider_success_at IS NOT NULL
+          AND (OLD.last_provider_success_at IS NULL
+            OR NEW.last_provider_success_at > OLD.last_provider_success_at)
+          AND NEW.last_provider_success_at = NEW.updated_at
+          AND NEW.discovery_version = OLD.discovery_version + 1
+        )
+      )
       AND OLD.discovery_lease_owner IS NOT NULL
       AND OLD.discovery_lease_generation IS OLD.generation
       AND OLD.discovery_lease_token_version IS OLD.token_version

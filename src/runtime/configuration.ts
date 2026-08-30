@@ -9,6 +9,8 @@ import {
 } from "../auth/google-oidc";
 import { DeviceSessions } from "../auth/device-sessions";
 import { IdentityDeletion } from "../auth/identity-deletion";
+import { LiveGoogleCalendar } from "../calendar/live-google-calendar";
+import { GoogleAccessTokens } from "../connections/google-access-tokens";
 import { OAuthTransactions } from "../auth/oauth-transactions";
 import { decodeSecretKey, tokenKeyringFromEnvironment } from "../crypto/secret-keys";
 import { webCryptoRandom } from "../crypto/random";
@@ -44,6 +46,7 @@ export interface RuntimeConfiguration {
   readonly deviceSessions: DeviceSessions;
   readonly identityDeletion: IdentityDeletion;
   readonly oauthTransactions: OAuthTransactions;
+  readonly liveGoogleCalendar: LiveGoogleCalendar;
   readonly tokenKeyring: KeyEncryptionKeyring;
   readonly googleProvider: GoogleProviderConfiguration;
   readonly outboundFetch: typeof fetch;
@@ -121,9 +124,8 @@ function initialize(env: Env): RuntimeConfiguration {
   }
   const transactionKeyring = keyring("OAUTH_TRANSACTION_KEK_V1", env.OAUTH_TRANSACTION_KEK_V1);
   const tokenKeyring = tokenKeyringFromEnvironment(env);
-  // Decode future-slice keys now so readiness fails before serving with partial configuration.
-  decodeSecretKey("CURSOR_KEY", env.CURSOR_KEY);
-  decodeSecretKey("EVENT_ID_KEY_V1", env.EVENT_ID_KEY_V1);
+  const cursorKey = decodeSecretKey("CURSOR_KEY", env.CURSOR_KEY);
+  const eventIdKey = decodeSecretKey("EVENT_ID_KEY_V1", env.EVENT_ID_KEY_V1);
 
   const oidcEndpoints = local
     ? googleOidcTestEndpoints({
@@ -171,6 +173,35 @@ function initialize(env: Env): RuntimeConfiguration {
     nowEpochSeconds,
     timeoutMilliseconds: 5_000,
   } as const;
+  const sleep = (milliseconds: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const googleAccessTokens = new GoogleAccessTokens({
+    db: env.DB,
+    environment: env.ENVIRONMENT,
+    googleClientId: env.GOOGLE_CLIENT_ID,
+    googleClientSecret: env.GOOGLE_CLIENT_SECRET,
+    tokenKeyring,
+    googleProvider,
+    fetch: outboundFetch,
+    nowEpochSeconds,
+    random: webCryptoRandom,
+    sleep,
+    providerTimeoutMs: 8_000,
+  });
+  const liveGoogleCalendar = new LiveGoogleCalendar({
+    db: env.DB,
+    accessTokens: googleAccessTokens,
+    environment: env.ENVIRONMENT,
+    googleProvider,
+    fetch: outboundFetch,
+    cursorKey,
+    eventIdKey,
+    nowEpochSeconds,
+    random: webCryptoRandom,
+    uuid: () => crypto.randomUUID(),
+    sleep,
+    providerTimeoutMs: 8_000,
+  });
   const oauthTransactions = new OAuthTransactions({
     db: env.DB,
     environment: env.ENVIRONMENT,
@@ -202,6 +233,7 @@ function initialize(env: Env): RuntimeConfiguration {
     deviceSessions,
     identityDeletion,
     oauthTransactions,
+    liveGoogleCalendar,
     tokenKeyring,
     googleProvider,
     outboundFetch,
