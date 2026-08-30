@@ -182,19 +182,26 @@ export function createHandlers(env: Env): RouteHandlers {
         .bind(connectionId, principalId)
         .first<ConnectionRow>();
       if (row === null) throw new ContractError("resource_not_found");
-      const token = await decryptTokenEnvelope(
-        tokenEnvelopeFromRow(row),
-        {
-          environment: runtime.environment,
-          provider: "google",
-          principalId,
-          connectionId: row.id,
-          connectionGeneration: row.generation,
-          tokenVersion: row.token_version,
-          tokenKind: "calendar_oauth",
-        },
-        runtime.tokenKeyring,
-      );
+      let refreshToken: string | undefined;
+      try {
+        refreshToken = (
+          await decryptTokenEnvelope(
+            tokenEnvelopeFromRow(row),
+            {
+              environment: runtime.environment,
+              provider: "google",
+              principalId,
+              connectionId: row.id,
+              connectionGeneration: row.generation,
+              tokenVersion: row.token_version,
+              tokenKind: "calendar_oauth",
+            },
+            runtime.tokenKeyring,
+          )
+        ).refreshToken;
+      } catch {
+        // Local disconnection must still fence authority when provider token material is corrupt.
+      }
       const deleted = await env.DB.prepare(
         `DELETE FROM connections WHERE id = ? AND principal_id = ? AND provider = 'google'
          AND generation = ? AND token_version = ? RETURNING id`,
@@ -202,15 +209,17 @@ export function createHandlers(env: Env): RouteHandlers {
         .bind(row.id, principalId, row.generation, row.token_version)
         .first<{ id: string }>();
       if (deleted?.id !== row.id) throw new ContractError("conflict");
-      try {
-        await revokeGoogleTokenBestEffort({
-          configuration: runtime.googleProvider,
-          token: token.refreshToken,
-          fetch: runtime.outboundFetch,
-          timeoutMs: 5_000,
-        });
-      } catch {
-        // Local deletion and its generation fence are authoritative; provider revocation is best effort.
+      if (refreshToken !== undefined) {
+        try {
+          await revokeGoogleTokenBestEffort({
+            configuration: runtime.googleProvider,
+            token: refreshToken,
+            fetch: runtime.outboundFetch,
+            timeoutMs: 5_000,
+          });
+        } catch {
+          // Local deletion and its generation fence are authoritative; provider revocation is best effort.
+        }
       }
       return undefined;
     },

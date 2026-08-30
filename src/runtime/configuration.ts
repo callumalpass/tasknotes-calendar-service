@@ -90,14 +90,20 @@ const outboundFetch: typeof fetch = async (input, init) => {
   return response;
 };
 
-function initialize(env: Env): RuntimeConfiguration {
+export function publicOriginFromEnvironment(env: Env): string {
   if (!ENVIRONMENTS.has(env.ENVIRONMENT)) throw new TypeError("ENVIRONMENT is invalid");
-  if (env.GOOGLE_ISSUER !== GOOGLE_ISSUER) throw new TypeError("GOOGLE_ISSUER is invalid");
   const local = env.ENVIRONMENT === "local";
   const publicOrigin = exactOrigin(env.PUBLIC_ORIGIN, !local);
   if (local && publicOrigin !== "http://127.0.0.1:8787") {
     throw new TypeError("local PUBLIC_ORIGIN is not pinned");
   }
+  return publicOrigin;
+}
+
+function initialize(env: Env): RuntimeConfiguration {
+  const publicOrigin = publicOriginFromEnvironment(env);
+  if (env.GOOGLE_ISSUER !== GOOGLE_ISSUER) throw new TypeError("GOOGLE_ISSUER is invalid");
+  const local = env.ENVIRONMENT === "local";
   const selected = local ? LOCAL : PRODUCTION;
 
   exact(env.GOOGLE_AUTHORIZATION_ENDPOINT, selected.authorization, "authorization endpoint");

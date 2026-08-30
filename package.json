@@ -21,7 +21,7 @@
     "test:e2e": "vitest run test/e2e",
     "migrations:local": "wrangler d1 migrations apply tasknotes-calendar-local --local",
     "deploy:dry-run": "wrangler deploy --dry-run --outdir dist/worker",
-    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test:coverage && pnpm deploy:dry-run"
+    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test:security && pnpm test:coverage && pnpm deploy:dry-run"
   },
   "dependencies": {
     "jose": "6.1.0",

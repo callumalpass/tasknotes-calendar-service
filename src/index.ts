@@ -1,7 +1,8 @@
 import type { Env } from "./env";
 import { createHandlers } from "./http/handlers";
+import { errorResponse } from "./http/responses";
 import { createRouter } from "./http/router";
-import { runtimeConfiguration } from "./runtime/configuration";
+import { publicOriginFromEnvironment, runtimeConfiguration } from "./runtime/configuration";
 
 const routers = new WeakMap<object, (request: Request) => Promise<Response>>();
 
@@ -20,7 +21,14 @@ function router(env: Env): (request: Request) => Promise<Response> {
 export function createWorker(): ExportedHandler<Env> {
   return {
     fetch(request, env): Promise<Response> {
-      return router(env)(request);
+      try {
+        if (new URL(request.url).origin !== publicOriginFromEnvironment(env)) {
+          return Promise.resolve(errorResponse("resource_not_found"));
+        }
+        return router(env)(request);
+      } catch {
+        return Promise.resolve(errorResponse("internal_error"));
+      }
     },
   };
 }
