@@ -338,7 +338,10 @@ describe("Worker HTTP OAuth and account slice", () => {
     ).toBe(204);
     expect((await api("/v1/session", {}, second.credential)).status).toBe(401);
 
+    await connect(first.credential);
+    const revocationsBeforeDeletion = (await stats()).revokeCalls;
     expect((await api("/v1/account", { method: "DELETE" }, first.credential)).status).toBe(204);
     expect((await api("/v1/session", {}, first.credential)).status).toBe(401);
+    expect((await stats()).revokeCalls).toBe(revocationsBeforeDeletion + 1);
   });
 });

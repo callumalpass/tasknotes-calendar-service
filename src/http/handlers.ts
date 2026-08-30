@@ -249,6 +249,35 @@ export function createHandlers(env: Env): RouteHandlers {
     deleteAccount: async (input) => {
       const runtime = await configured;
       const principalId = authenticated(input).principalId;
+      const connection = await env.DB.prepare(
+        `SELECT id, principal_id, status, generation, token_version, created_at, updated_at,
+                envelope_schema_version, key_version, dek_iv, wrapped_dek, payload_iv, ciphertext
+         FROM connections WHERE principal_id = ? AND provider = 'google' LIMIT 1`,
+      )
+        .bind(principalId)
+        .first<ConnectionRow>();
+      let refreshToken: string | undefined;
+      if (connection !== null) {
+        try {
+          refreshToken = (
+            await decryptTokenEnvelope(
+              tokenEnvelopeFromRow(connection),
+              {
+                environment: runtime.environment,
+                provider: "google",
+                principalId,
+                connectionId: connection.id,
+                connectionGeneration: connection.generation,
+                tokenVersion: connection.token_version,
+                tokenKind: "calendar_oauth",
+              },
+              runtime.tokenKeyring,
+            )
+          ).refreshToken;
+        } catch {
+          // Local account deletion must still complete when provider token material is corrupt.
+        }
+      }
       const identity = await env.DB.prepare(
         `SELECT id, provider, issuer, subject FROM external_identities
          WHERE principal_id = ? AND provider = 'google' AND issuer = 'https://accounts.google.com'
@@ -267,6 +296,18 @@ export function createHandlers(env: Env): RouteHandlers {
         },
       });
       if (result !== "completed") throw new ContractError("resource_not_found");
+      if (refreshToken !== undefined) {
+        try {
+          await revokeGoogleTokenBestEffort({
+            configuration: runtime.googleProvider,
+            token: refreshToken,
+            fetch: runtime.outboundFetch,
+            timeoutMs: 5_000,
+          });
+        } catch {
+          // The deletion fence and local cascade are authoritative; revocation is best effort.
+        }
+      }
       return undefined;
     },
   };

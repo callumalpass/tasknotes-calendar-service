@@ -1,4 +1,4 @@
-import { createRemoteJWKSet } from "jose";
+import { createRemoteJWKSet, customFetch } from "jose";
 
 import {
   exchangeGoogleCalendarCode,
@@ -137,7 +137,16 @@ function initialize(env: Env): RuntimeConfiguration {
     clientSecret: env.GOOGLE_CLIENT_SECRET,
     redirectUri: `${publicOrigin}${CALLBACK_PATH}`,
   };
-  const keyResolver = createRemoteJWKSet(new URL(selected.jwks), { timeoutDuration: 5_000 });
+  const keyResolver = createRemoteJWKSet(new URL(selected.jwks), {
+    timeoutDuration: 5_000,
+    [customFetch]: async (url, options) => {
+      const response = await outboundFetch(url, { ...options, redirect: "manual" });
+      if (response.status >= 300 && response.status < 400) {
+        throw new TypeError("JWKS redirect rejected");
+      }
+      return response;
+    },
+  });
   const nowEpochSeconds = (): number => Math.floor(Date.now() / 1_000);
   const deviceSessions = new DeviceSessions({
     db: env.DB,
