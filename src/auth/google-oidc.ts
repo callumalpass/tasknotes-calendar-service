@@ -1,9 +1,20 @@
 import { decodeProtectedHeader, jwtVerify } from "jose";
 import type { JWTVerifyGetKey, JWTPayload } from "jose";
 
+const endpointConfigurationBrand = Symbol("GoogleOidcEndpointConfiguration");
 const CANONICAL_ISSUER = "https://accounts.google.com";
+const PRODUCTION_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
+const PRODUCTION_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+const CALLBACK_PATH = "/oauth/google/callback";
 const ACCEPTED_ISSUERS = new Set([CANONICAL_ISSUER, "accounts.google.com"]);
 const IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
+const IDENTITY_SCOPE_ALIASES = new Map([
+  ["openid", "openid"],
+  ["email", "email"],
+  ["https://www.googleapis.com/auth/userinfo.email", "email"],
+  ["profile", "profile"],
+  ["https://www.googleapis.com/auth/userinfo.profile", "profile"],
+]);
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 const OAUTH_VALUE = /^[\u0021-\u007e]+$/;
@@ -28,6 +39,8 @@ const textDecoder = new TextDecoder("utf-8", { fatal: true });
 export interface GoogleOidcEndpoints {
   readonly authorizationEndpoint: string;
   readonly tokenEndpoint: string;
+  readonly mode: "production" | "test";
+  readonly [endpointConfigurationBrand]: true;
 }
 
 export interface GoogleOidcClient {
@@ -128,20 +141,85 @@ function assertBoundedAscii(value: string, maximumBytes = MAX_PARAMETER_BYTES): 
   }
 }
 
-function assertEndpoint(value: string): URL {
+function makeEndpoints(
+  authorizationEndpoint: URL,
+  tokenEndpoint: URL,
+  mode: "production" | "test",
+): GoogleOidcEndpoints {
+  const authorization = authorizationEndpoint.href;
+  const token = tokenEndpoint.href;
+  return Object.freeze({
+    authorizationEndpoint: authorization,
+    tokenEndpoint: token,
+    mode,
+    [endpointConfigurationBrand]: true as const,
+  });
+}
+
+export function googleOidcProductionEndpoints(): GoogleOidcEndpoints {
+  return makeEndpoints(
+    new URL(PRODUCTION_AUTHORIZATION_ENDPOINT),
+    new URL(PRODUCTION_TOKEN_ENDPOINT),
+    "production",
+  );
+}
+
+function loopbackEndpoint(value: string): URL {
+  const url = new URL(value);
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.hostname !== "127.0.0.1" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    url.pathname === "/"
+  ) {
+    throw new TypeError("test Google endpoint must be an exact loopback URL");
+  }
+  return url;
+}
+
+export function googleOidcTestEndpoints(input: {
+  readonly authorizationEndpoint: string;
+  readonly tokenEndpoint: string;
+}): GoogleOidcEndpoints {
+  return makeEndpoints(
+    loopbackEndpoint(input.authorizationEndpoint),
+    loopbackEndpoint(input.tokenEndpoint),
+    "test",
+  );
+}
+
+function validateEndpoints(value: GoogleOidcEndpoints): GoogleOidcEndpoints {
+  if ((value as unknown as Record<PropertyKey, unknown>)[endpointConfigurationBrand] !== true) {
+    fail("invalid_request");
+  }
+  return value;
+}
+
+function validateRedirectUri(value: string, mode: "production" | "test"): void {
+  assertBoundedAscii(value);
   try {
     const url = new URL(value);
+    const productionValid = mode === "production" && url.protocol === "https:";
+    const testValid =
+      mode === "test" &&
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.hostname === "127.0.0.1";
     if (
-      url.protocol !== "https:" ||
+      (!productionValid && !testValid) ||
       url.username !== "" ||
       url.password !== "" ||
-      url.hash !== ""
+      url.search !== "" ||
+      url.hash !== "" ||
+      url.pathname !== CALLBACK_PATH
     ) {
       fail("invalid_request");
     }
-    return url;
-  } catch {
-    return fail("invalid_request");
+  } catch (error) {
+    if (error instanceof GoogleOidcError) throw error;
+    fail("invalid_request");
   }
 }
 
@@ -172,8 +250,9 @@ function authorizationUrl(
 ): URL {
   validateCommonAuthorization(input);
   assertBoundedAscii(client.clientId);
-  assertBoundedAscii(client.redirectUri);
-  const url = assertEndpoint(endpoints.authorizationEndpoint);
+  const configured = validateEndpoints(endpoints);
+  validateRedirectUri(client.redirectUri, configured.mode);
+  const url = new URL(configured.authorizationEndpoint);
   url.search = "";
   url.searchParams.set("client_id", client.clientId);
   url.searchParams.set("redirect_uri", client.redirectUri);
@@ -185,7 +264,6 @@ function authorizationUrl(
   url.searchParams.set("code_challenge_method", "S256");
   if (calendar) {
     url.searchParams.set("access_type", "offline");
-    url.searchParams.set("include_granted_scopes", "true");
     url.searchParams.set("prompt", "consent");
   }
   return url;
@@ -266,6 +344,28 @@ function parseScopes(value: unknown): string[] {
   return scopes;
 }
 
+function validatedGrantedScopes(
+  scopes: readonly string[],
+  permittedCalendarScopes: readonly string[],
+): string[] {
+  const permittedCalendar = new Set(permittedCalendarScopes);
+  const effective = new Set<string>();
+  for (const scope of scopes) {
+    const identityScope = IDENTITY_SCOPE_ALIASES.get(scope);
+    if (identityScope !== undefined) {
+      effective.add(identityScope);
+      continue;
+    }
+    if (!ALLOWED_CALENDAR_SCOPES.has(scope) || !permittedCalendar.has(scope)) {
+      fail("insufficient_scope");
+    }
+    effective.add(scope);
+  }
+  if (IDENTITY_SCOPES.some((scope) => !effective.has(scope))) fail("insufficient_scope");
+  if (permittedCalendarScopes.some((scope) => !effective.has(scope))) fail("insufficient_scope");
+  return [...effective];
+}
+
 function parseTokenResponse(value: unknown): TokenResponse {
   if (!isRecord(value)) fail("invalid_token_response");
   const expires = value["expires_in"];
@@ -296,11 +396,12 @@ async function exchangeCode(
 ): Promise<TokenResponse> {
   assertBoundedAscii(client.clientId);
   assertBoundedAscii(client.clientSecret, MAX_TOKEN_BYTES);
-  assertBoundedAscii(client.redirectUri);
+  const configured = validateEndpoints(endpoints);
+  validateRedirectUri(client.redirectUri, configured.mode);
   assertBoundedAscii(input.code, MAX_TOKEN_BYTES);
   if (!PKCE_VERIFIER.test(input.codeVerifier)) fail("invalid_request");
   assertBoundedAscii(input.expectedNonce);
-  const tokenEndpoint = assertEndpoint(endpoints.tokenEndpoint);
+  const tokenEndpoint = new URL(configured.tokenEndpoint);
   const timeout = dependencies.timeoutMilliseconds ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000) fail("invalid_request");
   const body = new URLSearchParams({
@@ -317,6 +418,7 @@ async function exchangeCode(
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
       body,
+      redirect: "error",
       signal: AbortSignal.timeout(timeout),
     });
   } catch {
@@ -443,8 +545,7 @@ export async function exchangeGoogleSignInCode(
   dependencies: GoogleOidcDependencies,
 ): Promise<GoogleIdentity> {
   const tokens = await exchangeCode(endpoints, client, input, dependencies);
-  const granted = new Set(tokens.scopes);
-  if (IDENTITY_SCOPES.some((scope) => !granted.has(scope))) fail("insufficient_scope");
+  validatedGrantedScopes(tokens.scopes, []);
   return verifyIdentity(tokens.idToken, input.expectedNonce, client.clientId, dependencies);
 }
 
@@ -454,7 +555,7 @@ export async function exchangeGoogleCalendarCode(
   input: GoogleCalendarTokenExchangeInput,
   dependencies: GoogleOidcDependencies,
 ): Promise<GoogleCalendarConnectionResult> {
-  const required = [...IDENTITY_SCOPES, ...validateCalendarScopes(input.requiredCalendarScopes)];
+  const requiredCalendarScopes = validateCalendarScopes(input.requiredCalendarScopes);
   assertBoundedAscii(input.expectedSubject);
   const tokens = await exchangeCode(endpoints, client, input, dependencies);
   const identity = await verifyIdentity(
@@ -465,15 +566,14 @@ export async function exchangeGoogleCalendarCode(
   );
   if (identity.subject !== input.expectedSubject) fail("identity_mismatch");
   if (tokens.refreshToken === undefined) fail("invalid_token_response");
-  const granted = new Set(tokens.scopes);
-  if (required.some((scope) => !granted.has(scope))) fail("insufficient_scope");
+  const scopes = validatedGrantedScopes(tokens.scopes, requiredCalendarScopes);
   return {
     identity,
     tokenMaterial: {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
       expiresInSeconds: tokens.expiresInSeconds,
-      scopes: tokens.scopes,
+      scopes,
     },
   };
 }

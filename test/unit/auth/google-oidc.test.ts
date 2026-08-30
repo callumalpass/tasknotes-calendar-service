@@ -8,6 +8,8 @@ import {
   createGoogleSignInAuthorizationUrl,
   exchangeGoogleCalendarCode,
   exchangeGoogleSignInCode,
+  googleOidcProductionEndpoints,
+  googleOidcTestEndpoints,
 } from "../../../src/auth/google-oidc";
 import type {
   GoogleOidcClient,
@@ -19,14 +21,14 @@ import type {
 const NOW = 2_000_000_000;
 const KID = "fixture-key-1";
 const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
-const endpoints: GoogleOidcEndpoints = {
-  authorizationEndpoint: "https://accounts.google.test/o/oauth2/v2/auth",
-  tokenEndpoint: "https://oauth2.google.test/token",
-};
+const endpoints: GoogleOidcEndpoints = googleOidcTestEndpoints({
+  authorizationEndpoint: "http://127.0.0.1:9797/authorize",
+  tokenEndpoint: "http://127.0.0.1:9797/token",
+});
 const client: GoogleOidcClient = {
   clientId: "tasknotes-client.apps.googleusercontent.com",
   clientSecret: "client-secret",
-  redirectUri: "https://calendar.tasknotes.test/v1/oauth/google/callback?fixed=1",
+  redirectUri: "http://127.0.0.1:8787/oauth/google/callback",
 };
 const exchangeInput: GoogleTokenExchangeInput = {
   code: "one-time-code",
@@ -78,13 +80,22 @@ async function tokenPayload(
 ): Promise<Record<string, unknown>> {
   return {
     access_token: "access-secret",
-    refresh_token: "refresh-secret",
     expires_in: 3_600,
     token_type: "Bearer",
-    scope: `openid email profile ${CALENDAR_SCOPE}`,
+    scope: "openid email profile",
     id_token: await signedToken(),
     ...overrides,
   };
+}
+
+async function calendarTokenPayload(
+  overrides: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  return tokenPayload({
+    refresh_token: "refresh-secret",
+    scope: `openid email profile ${CALENDAR_SCOPE}`,
+    ...overrides,
+  });
 }
 
 function resolver(
@@ -156,9 +167,30 @@ describe("Google authorization URLs", () => {
     });
     expect(url.searchParams.get("scope")).toBe(`openid email profile ${CALENDAR_SCOPE}`);
     expect(url.searchParams.get("access_type")).toBe("offline");
-    expect(url.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(url.searchParams.has("include_granted_scopes")).toBe(false);
     expect(url.searchParams.get("prompt")).toBe("consent");
     expect(url.searchParams.get("redirect_uri")).toBe(client.redirectUri);
+  });
+
+  it("pins production endpoints and permits only explicit loopback test endpoints", () => {
+    expect(googleOidcProductionEndpoints()).toMatchObject({
+      authorizationEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+      tokenEndpoint: "https://oauth2.googleapis.com/token",
+      mode: "production",
+    });
+    expect(() =>
+      googleOidcTestEndpoints({
+        authorizationEndpoint: "https://evil.example/authorize",
+        tokenEndpoint: "http://127.0.0.1:9797/token",
+      }),
+    ).toThrow("exact loopback URL");
+    expect(() =>
+      createGoogleSignInAuthorizationUrl(
+        endpoints,
+        { ...client, redirectUri: "https://evil.example/oauth/google/callback" },
+        authorization,
+      ),
+    ).toThrow(GoogleOidcError);
   });
 
   it("rejects writable, duplicate, and malformed authorization inputs", () => {
@@ -202,6 +234,7 @@ describe("Google code exchange and ID token verification", () => {
     expect(body.get("redirect_uri")).toBe(client.redirectUri);
     expect(body.get("code_verifier")).toBe(exchangeInput.codeVerifier);
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.redirect).toBe("error");
   });
 
   it("rejects sign-in when any requested identity scope is missing", async () => {
@@ -211,6 +244,19 @@ describe("Google code exchange and ID token verification", () => {
       exchangeGoogleSignInCode(endpoints, client, exchangeInput, dependencies(response)),
       "insufficient_scope",
     );
+  });
+
+  it("accepts Google's canonical identity-scope aliases without a refresh token", async () => {
+    const response = jsonResponse(
+      await tokenPayload({
+        scope:
+          "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
+      }),
+    );
+
+    await expect(
+      exchangeGoogleSignInCode(endpoints, client, exchangeInput, dependencies(response)),
+    ).resolves.toMatchObject({ subject: "google-subject-123" });
   });
 
   it("accepts and canonicalizes Google's bare issuer spelling", async () => {
@@ -338,7 +384,7 @@ describe("calendar connection exchange", () => {
         expectedSubject: "google-subject-123",
         requiredCalendarScopes: [CALENDAR_SCOPE],
       },
-      dependencies(jsonResponse(await tokenPayload())),
+      dependencies(jsonResponse(await calendarTokenPayload())),
     );
     expect(result.tokenMaterial).toEqual({
       accessToken: "access-secret",
@@ -358,14 +404,14 @@ describe("calendar connection exchange", () => {
           expectedSubject: "different-subject",
           requiredCalendarScopes: [CALENDAR_SCOPE],
         },
-        dependencies(jsonResponse(await tokenPayload())),
+        dependencies(jsonResponse(await calendarTokenPayload())),
       ),
       "identity_mismatch",
     );
   });
 
   it("rejects a missing refresh token", async () => {
-    const payload = await tokenPayload();
+    const payload = await calendarTokenPayload();
     delete payload["refresh_token"];
     await expectCode(
       exchangeGoogleCalendarCode(
@@ -379,6 +425,46 @@ describe("calendar connection exchange", () => {
         dependencies(jsonResponse(payload)),
       ),
       "invalid_token_response",
+    );
+  });
+
+  it("normalizes mixed identity aliases and rejects an inherited writable scope", async () => {
+    const aliased = await exchangeGoogleCalendarCode(
+      endpoints,
+      client,
+      {
+        ...exchangeInput,
+        expectedSubject: "google-subject-123",
+        requiredCalendarScopes: [CALENDAR_SCOPE],
+      },
+      dependencies(
+        jsonResponse(
+          await calendarTokenPayload({
+            scope: `openid email https://www.googleapis.com/auth/userinfo.email profile https://www.googleapis.com/auth/userinfo.profile ${CALENDAR_SCOPE}`,
+          }),
+        ),
+      ),
+    );
+    expect(aliased.tokenMaterial.scopes).toEqual(["openid", "email", "profile", CALENDAR_SCOPE]);
+
+    await expectCode(
+      exchangeGoogleCalendarCode(
+        endpoints,
+        client,
+        {
+          ...exchangeInput,
+          expectedSubject: "google-subject-123",
+          requiredCalendarScopes: [CALENDAR_SCOPE],
+        },
+        dependencies(
+          jsonResponse(
+            await calendarTokenPayload({
+              scope: `openid email profile ${CALENDAR_SCOPE} https://www.googleapis.com/auth/calendar.events`,
+            }),
+          ),
+        ),
+      ),
+      "insufficient_scope",
     );
   });
 
@@ -396,7 +482,7 @@ describe("calendar connection exchange", () => {
           expectedSubject: "google-subject-123",
           requiredCalendarScopes: [CALENDAR_SCOPE],
         },
-        dependencies(jsonResponse(await tokenPayload({ scope }))),
+        dependencies(jsonResponse(await calendarTokenPayload({ scope }))),
       ),
       "insufficient_scope",
     );
