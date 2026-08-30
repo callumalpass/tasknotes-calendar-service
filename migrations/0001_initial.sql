@@ -225,7 +225,7 @@ WHEN NEW.created_at IS NOT OLD.created_at
       )
     )
     OR
-    -- Refresh lease acquisition or an expired lease steal.
+    -- Refresh lease acquisition. Refresh leases are never stolen after provider work may begin.
     (
       NEW.last_provider_success_at IS OLD.last_provider_success_at
       AND OLD.status = 'active'
@@ -238,10 +238,10 @@ WHEN NEW.created_at IS NOT OLD.created_at
       AND NEW.wrapped_dek IS OLD.wrapped_dek
       AND NEW.payload_iv IS OLD.payload_iv
       AND NEW.ciphertext IS OLD.ciphertext
-      AND (OLD.refresh_lease_owner IS NULL OR OLD.refresh_lease_until <= NEW.updated_at)
+      AND OLD.refresh_lease_owner IS NULL
       AND NEW.refresh_lease_owner IS NOT NULL
       AND NEW.refresh_lease_until > NEW.updated_at
-      AND NEW.refresh_lease_until <= NEW.updated_at + 60
+      AND NEW.refresh_lease_until <= NEW.updated_at + 120
       AND NEW.refresh_lease_generation IS NEW.generation
       AND NEW.refresh_lease_token_version IS NEW.token_version
       AND NEW.discovery_lease_owner IS OLD.discovery_lease_owner

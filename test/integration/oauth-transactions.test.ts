@@ -71,7 +71,7 @@ async function challenge(): Promise<string> {
   return createPkceS256Challenge(VERIFIER);
 }
 
-async function insertPrincipal(connection = false): Promise<void> {
+async function insertPrincipal(connection = false, reconnect = true): Promise<void> {
   await testEnv.DB.prepare(
     "INSERT INTO principals (id, created_at, last_active_at) VALUES (?, ?, ?)",
   )
@@ -98,11 +98,13 @@ async function insertPrincipal(connection = false): Promise<void> {
     )
       .bind(PRINCIPAL, IDENTITY, NOW, NOW)
       .run();
-    await testEnv.DB.prepare(
-      "UPDATE connections SET status = 'reconnect_required' WHERE principal_id = ?",
-    )
-      .bind(PRINCIPAL)
-      .run();
+    if (reconnect) {
+      await testEnv.DB.prepare(
+        "UPDATE connections SET status = 'reconnect_required' WHERE principal_id = ?",
+      )
+        .bind(PRINCIPAL)
+        .run();
+    }
   }
 }
 
@@ -639,9 +641,27 @@ describe("OAuth transactions against migrated D1", () => {
     expect(exchangeCalendarCalls).toBe(1);
   });
 
-  it("replaces reconnect_required in place and advances generation and token version exactly once", async () => {
-    await insertPrincipal(true);
+  it("clears discovery and refresh leases racing an in-place replacement", async () => {
+    await insertPrincipal(true, false);
     const started = await startConnect();
+    await testEnv.DB.prepare(
+      `UPDATE connections SET discovery_lease_owner = 'discovery-racer',
+         discovery_lease_until = unixepoch() + 30,
+         discovery_lease_generation = generation,
+         discovery_lease_token_version = token_version, updated_at = unixepoch()
+       WHERE principal_id = ?`,
+    )
+      .bind(PRINCIPAL)
+      .run();
+    await testEnv.DB.prepare(
+      `UPDATE connections SET refresh_lease_owner = 'refresh-racer',
+         refresh_lease_until = unixepoch() + 120,
+         refresh_lease_generation = generation,
+         refresh_lease_token_version = token_version, updated_at = unixepoch()
+       WHERE principal_id = ?`,
+    )
+      .bind(PRINCIPAL)
+      .run();
     const snapshot = await testEnv.DB.prepare(
       `SELECT expected_connection_id, expected_connection_generation, expected_token_version,
               target_connection_id, target_connection_generation, target_token_version
@@ -659,12 +679,17 @@ describe("OAuth transactions against migrated D1", () => {
     });
     await service.callback({ code: "calendar-provider-code", state: state(started) });
     await expect(
-      testEnv.DB.prepare("SELECT id, status, generation, token_version FROM connections").first(),
+      testEnv.DB.prepare(
+        `SELECT id, status, generation, token_version, refresh_lease_owner,
+                discovery_lease_owner FROM connections`,
+      ).first(),
     ).resolves.toEqual({
       id: "20000000-0000-4000-8000-000000000001",
       status: "active",
       generation: 2,
       token_version: 2,
+      refresh_lease_owner: null,
+      discovery_lease_owner: null,
     });
   });
 

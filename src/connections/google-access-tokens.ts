@@ -15,7 +15,7 @@ import { tokenEnvelopeFromRow, tokenEnvelopeToRow } from "../storage/token-envel
 const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const TOKEN_KIND = "calendar_oauth";
 const FRESHNESS_SKEW_SECONDS = 60;
-const LEASE_SECONDS = 30;
+const LEASE_SECONDS = 120;
 const LOSER_DELAYS_MS = [50, 100, 200, 400, 800] as const;
 const RETRY_AFTER_SECONDS = 1;
 const MAX_RETRY_AFTER_SECONDS = 3_600;
@@ -63,7 +63,6 @@ export interface GoogleAccessTokensDependencies {
   readonly tokenKeyring: KeyEncryptionKeyring;
   readonly googleProvider: GoogleProviderConfiguration;
   readonly fetch: typeof fetch;
-  readonly nowEpochSeconds: () => number;
   readonly random: RandomByteSource;
   readonly sleep: (milliseconds: number) => Promise<void>;
   readonly providerTimeoutMs?: number;
@@ -87,6 +86,7 @@ interface ConnectionRow {
   readonly refresh_lease_generation: number | null;
   readonly refresh_lease_token_version: number | null;
   readonly updated_at: number;
+  readonly database_now: number;
 }
 
 interface SnapshotState {
@@ -172,6 +172,7 @@ function parseRow(value: unknown): ConnectionRow {
     refresh_lease_generation: row["refresh_lease_generation"] as number | null,
     refresh_lease_token_version: row["refresh_lease_token_version"] as number | null,
     updated_at: epoch(row["updated_at"]),
+    database_now: epoch(row["database_now"]),
   };
   if (
     parsed.principal_generation !== parsed.generation ||
@@ -258,6 +259,7 @@ function retryAfter(error: ProviderError): number | undefined {
 export class GoogleAccessTokens {
   readonly #dependencies: GoogleAccessTokensDependencies;
   readonly #snapshots = new WeakMap<ConnectionSnapshot, SnapshotState>();
+  readonly #grants = new WeakSet<AccessGrant>();
 
   public constructor(dependencies: GoogleAccessTokensDependencies) {
     if (
@@ -281,7 +283,8 @@ export class GoogleAccessTokens {
                   connection.dek_iv, connection.wrapped_dek, connection.payload_iv,
                   connection.ciphertext, connection.refresh_lease_owner,
                   connection.refresh_lease_until, connection.refresh_lease_generation,
-                  connection.refresh_lease_token_version, connection.updated_at
+                  connection.refresh_lease_token_version, connection.updated_at,
+                  unixepoch() AS database_now
            FROM connections AS connection
            JOIN principals AS principal
              ON principal.id = connection.principal_id
@@ -324,13 +327,13 @@ export class GoogleAccessTokens {
     )
       return failure("internal");
     try {
-      const now = this.#now();
+      const databaseNow = await this.#databaseNow();
       if (
         !options.forceRefresh &&
-        state.payload.expiresAtEpochSeconds > now + FRESHNESS_SKEW_SECONDS
+        state.payload.expiresAtEpochSeconds > databaseNow + FRESHNESS_SKEW_SECONDS
       )
         return this.#grant(state.row, state.payload.accessToken);
-      return await this.#refresh(state.row, state.payload, now);
+      return await this.#refresh(state.row, state.payload);
     } catch (error) {
       if (error instanceof GoogleAccessTokenError) throw error;
       return failure("internal");
@@ -339,6 +342,7 @@ export class GoogleAccessTokens {
 
   public async assertCurrent(grant: AccessGrant): Promise<void> {
     try {
+      if (!this.#grants.has(grant)) return failure("internal");
       canonicalUuid(grant.principalId);
       canonicalUuid(grant.connectionId);
       positiveInteger(grant.generation);
@@ -401,17 +405,15 @@ export class GoogleAccessTokens {
     }
   }
 
-  #now(): number {
-    try {
-      return epoch(this.#dependencies.nowEpochSeconds());
-    } catch (error) {
-      if (error instanceof GoogleAccessTokenError) throw error;
-      return failure("internal");
-    }
+  async #databaseNow(): Promise<number> {
+    const value = await this.#dependencies.db
+      .prepare("SELECT unixepoch() AS database_now")
+      .first("database_now");
+    return epoch(value);
   }
 
   #grant(row: ConnectionRow, accessToken: string): AccessGrant {
-    return Object.freeze({
+    const grant = Object.freeze({
       accessToken,
       principalId: row.principal_id,
       connectionId: row.id,
@@ -419,6 +421,8 @@ export class GoogleAccessTokens {
       tokenVersion: row.token_version,
       principalGeneration: row.principal_generation,
     });
+    this.#grants.add(grant);
+    return grant;
   }
 
   async #current(principalId: string): Promise<ConnectionRow | null> {
@@ -430,7 +434,8 @@ export class GoogleAccessTokens {
                 connection.dek_iv, connection.wrapped_dek, connection.payload_iv,
                 connection.ciphertext, connection.refresh_lease_owner,
                 connection.refresh_lease_until, connection.refresh_lease_generation,
-                connection.refresh_lease_token_version, connection.updated_at
+                connection.refresh_lease_token_version, connection.updated_at,
+                unixepoch() AS database_now
          FROM connections AS connection JOIN principals AS principal
            ON principal.id = connection.principal_id
          WHERE connection.principal_id = ? AND connection.provider = 'google' LIMIT 1`,
@@ -445,54 +450,58 @@ export class GoogleAccessTokens {
     return failure(row?.status === "reconnect_required" ? "reconnect" : "conflict");
   }
 
-  async #acquire(row: ConnectionRow, owner: string, now: number): Promise<boolean> {
+  async #acquire(row: ConnectionRow, owner: string): Promise<boolean> {
     try {
       const acquired = await this.#dependencies.db
         .prepare(
-          `UPDATE connections SET refresh_lease_owner = ?, refresh_lease_until = ?,
+          `UPDATE connections SET refresh_lease_owner = ?,
+             refresh_lease_until = unixepoch() + ${LEASE_SECONDS},
              refresh_lease_generation = generation, refresh_lease_token_version = token_version,
-             updated_at = ?
+             updated_at = unixepoch()
            WHERE id = ? AND principal_id = ? AND provider = 'google' AND status = 'active'
-             AND generation = ? AND token_version = ?
-             AND (refresh_lease_owner IS NULL OR refresh_lease_until <= ?)
+             AND generation = ? AND token_version = ? AND refresh_lease_owner IS NULL
              AND EXISTS (SELECT 1 FROM principals WHERE id = ?
                AND google_connection_generation = ?)
-           RETURNING refresh_lease_owner`,
+           RETURNING refresh_lease_owner, refresh_lease_until, unixepoch() AS database_now`,
         )
         .bind(
           owner,
-          now + LEASE_SECONDS,
-          now,
           row.id,
           row.principal_id,
           row.generation,
           row.token_version,
-          now,
           row.principal_id,
           row.principal_generation,
         )
-        .first<{ refresh_lease_owner: string }>();
-      return acquired?.refresh_lease_owner === owner;
+        .first<{
+          refresh_lease_owner: string;
+          refresh_lease_until: number;
+          database_now: number;
+        }>();
+      return (
+        acquired?.refresh_lease_owner === owner &&
+        epoch(acquired.refresh_lease_until) > epoch(acquired.database_now)
+      );
     } catch {
-      // D1 can report a transport failure after applying a write. Read-back is the only proof
-      // accepted before crossing the provider boundary.
+      // D1 can report a transport failure after applying a write. Exact, still-live read-back is
+      // the only ownership proof accepted before crossing the provider boundary.
       const current = await this.#current(row.principal_id);
-      if (current !== null && sameAuthority(row, current)) {
-        return (
-          current.status === "active" &&
-          current.token_version === row.token_version &&
-          current.refresh_lease_owner === owner
-        );
+      if (
+        current !== null &&
+        sameAuthority(row, current) &&
+        current.status === "active" &&
+        current.token_version === row.token_version &&
+        current.refresh_lease_owner === owner &&
+        (current.refresh_lease_until ?? 0) > current.database_now
+      ) {
+        return true;
       }
+      if (current !== null && sameAuthority(row, current)) return false;
       return this.#failForCurrent(row.principal_id);
     }
   }
 
-  async #refresh(
-    row: ConnectionRow,
-    payload: TokenPayload,
-    initialNow: number,
-  ): Promise<AccessGrant> {
+  async #refresh(row: ConnectionRow, payload: TokenPayload): Promise<AccessGrant> {
     let owner: string;
     try {
       owner = encodeBase64Url(randomBytes(this.#dependencies.random, 16));
@@ -501,8 +510,7 @@ export class GoogleAccessTokens {
     }
     if (owner === row.refresh_lease_owner) return failure("internal");
     let current = row;
-    let now = initialNow;
-    let ownsLease = await this.#acquire(current, owner, now);
+    const ownsLease = await this.#acquire(current, owner);
     if (!ownsLease) {
       for (const delay of LOSER_DELAYS_MS) {
         current =
@@ -514,11 +522,11 @@ export class GoogleAccessTokens {
           return this.#grant(current, winner.accessToken);
         }
         if (current.token_version !== row.token_version) return failure("conflict");
-        now = this.#now();
-        if (current.refresh_lease_owner === null || (current.refresh_lease_until ?? 0) <= now) {
-          if (owner === current.refresh_lease_owner) return failure("internal");
-          ownsLease = await this.#acquire(current, owner, now);
-          if (ownsLease) break;
+        if (
+          current.refresh_lease_owner !== null &&
+          (current.refresh_lease_until ?? 0) <= current.database_now
+        ) {
+          return this.#expireExactLease(row, current);
         }
         try {
           await this.#dependencies.sleep(delay);
@@ -532,17 +540,67 @@ export class GoogleAccessTokens {
         const winner = await this.#decrypt(current);
         return this.#grant(current, winner.accessToken);
       }
-      if (!ownsLease) {
-        if (!sameAuthority(row, current) || current.status !== "active")
-          return this.#failForRow(current);
-        return failure("unavailable", RETRY_AFTER_SECONDS);
+      if (!sameAuthority(row, current) || current.status !== "active")
+        return this.#failForRow(current);
+      if (
+        current.refresh_lease_owner !== null &&
+        (current.refresh_lease_until ?? 0) <= current.database_now
+      ) {
+        return this.#expireExactLease(row, current);
       }
+      return failure("unavailable", RETRY_AFTER_SECONDS);
     }
     return this.#refreshAsOwner(row, payload, owner);
   }
 
   #failForRow(row: ConnectionRow): never {
     return failure(row.status === "reconnect_required" ? "reconnect" : "conflict");
+  }
+
+  async #expireExactLease(row: ConnectionRow, observed: ConnectionRow): Promise<never> {
+    if (
+      observed.refresh_lease_owner === null ||
+      observed.refresh_lease_until === null ||
+      observed.refresh_lease_until > observed.database_now
+    ) {
+      return failure("unavailable", RETRY_AFTER_SECONDS);
+    }
+    try {
+      await this.#dependencies.db
+        .prepare(
+          `UPDATE connections SET status = 'reconnect_required',
+             refresh_lease_owner = NULL, refresh_lease_until = NULL,
+             refresh_lease_generation = NULL, refresh_lease_token_version = NULL,
+             discovery_lease_owner = NULL, discovery_lease_until = NULL,
+             discovery_lease_generation = NULL, discovery_lease_token_version = NULL,
+             updated_at = unixepoch()
+           WHERE id = ? AND principal_id = ? AND provider = 'google' AND status = 'active'
+             AND generation = ? AND token_version = ? AND refresh_lease_owner = ?
+             AND refresh_lease_until = ? AND refresh_lease_until <= unixepoch()
+             AND refresh_lease_generation = ? AND refresh_lease_token_version = ?
+             AND EXISTS (SELECT 1 FROM principals WHERE id = ?
+               AND google_connection_generation = ?)`,
+        )
+        .bind(
+          row.id,
+          row.principal_id,
+          row.generation,
+          row.token_version,
+          observed.refresh_lease_owner,
+          observed.refresh_lease_until,
+          row.generation,
+          row.token_version,
+          row.principal_id,
+          row.principal_generation,
+        )
+        .run();
+    } catch {
+      // Resolve both a lost race and an ambiguous applied transition through current authority.
+    }
+    const current = await this.#current(row.principal_id);
+    if (current?.status === "reconnect_required" && sameAuthority(row, current))
+      return failure("reconnect");
+    return failure("unavailable", RETRY_AFTER_SECONDS);
   }
 
   async #refreshAsOwner(
@@ -563,7 +621,6 @@ export class GoogleAccessTokens {
           : { timeoutMs: this.#dependencies.providerTimeoutMs }),
       });
     } catch {
-      await this.#release(row, owner);
       return failure("unavailable");
     }
     if (!result.ok) return this.#providerFailure(row, owner, result.error);
@@ -575,7 +632,6 @@ export class GoogleAccessTokens {
       refreshed.expiresInSeconds > 86_400 ||
       (refreshed.refreshToken !== undefined && !boundedSecret(refreshed.refreshToken))
     ) {
-      await this.#release(row, owner);
       return failure("unavailable");
     }
     let scopes: readonly string[];
@@ -585,10 +641,9 @@ export class GoogleAccessTokens {
           ? normalizedScopes(payload.scopes)
           : returnedScopes(refreshed.scope);
     } catch {
-      await this.#release(row, owner);
       return failure("unavailable");
     }
-    const committedAt = this.#now();
+    const committedAt = await this.#databaseNow();
     const nextPayload: TokenPayload = {
       accessToken: refreshed.accessToken,
       refreshToken: refreshed.refreshToken ?? payload.refreshToken,
@@ -612,7 +667,6 @@ export class GoogleAccessTokens {
         this.#dependencies.random,
       );
     } catch {
-      await this.#release(row, owner);
       return failure("internal");
     }
     return this.#commit(row, owner, generated, nextPayload, committedAt);
@@ -628,7 +682,7 @@ export class GoogleAccessTokens {
                refresh_lease_generation = NULL, refresh_lease_token_version = NULL,
                discovery_lease_owner = NULL, discovery_lease_until = NULL,
                discovery_lease_generation = NULL, discovery_lease_token_version = NULL,
-               updated_at = ?
+               updated_at = unixepoch()
              WHERE id = ? AND principal_id = ? AND provider = 'google' AND status = 'active'
                AND generation = ? AND token_version = ? AND refresh_lease_owner = ?
                AND refresh_lease_generation = ? AND refresh_lease_token_version = ?
@@ -636,7 +690,6 @@ export class GoogleAccessTokens {
                  AND google_connection_generation = ?)`,
           )
           .bind(
-            this.#now(),
             row.id,
             row.principal_id,
             row.generation,
@@ -657,36 +710,9 @@ export class GoogleAccessTokens {
         return failure("reconnect");
       return failure("conflict");
     }
-    await this.#release(row, owner);
     if (error.code === "rate_limited")
       return failure("rate_limited", retryAfter(error) ?? RETRY_AFTER_SECONDS);
     return failure("unavailable", retryAfter(error));
-  }
-
-  async #release(row: ConnectionRow, owner: string): Promise<void> {
-    try {
-      await this.#dependencies.db
-        .prepare(
-          `UPDATE connections SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
-             refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
-           WHERE id = ? AND principal_id = ? AND provider = 'google'
-             AND generation = ? AND token_version = ? AND refresh_lease_owner = ?
-             AND refresh_lease_generation = ? AND refresh_lease_token_version = ?`,
-        )
-        .bind(
-          this.#now(),
-          row.id,
-          row.principal_id,
-          row.generation,
-          row.token_version,
-          owner,
-          row.generation,
-          row.token_version,
-        )
-        .run();
-    } catch {
-      // A failed release is safe: the bounded lease expires and all later mutations still use CAS.
-    }
   }
 
   async #commit(
