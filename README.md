@@ -6,7 +6,8 @@ The first implementation target is a Google-only, read-only Cloudflare Worker ve
 federated Google identity, encrypted server-side token custody, per-device sessions, calendar
 discovery, and bounded event reads.
 
-The service is under active design and is not ready for real credentials or production use.
+The Google read-only vertical slice is implemented and verified against a signed local provider. It
+is not yet approved for real credentials or production use.
 
 ## Local verification
 
@@ -26,9 +27,10 @@ distinct from `TOKEN_KEK_V1`. Local Google endpoints are pinned to the fake prov
 `PUBLIC_ORIGIN` is an origin (no path), and the registered redirect is exactly
 `/oauth/google/callback`.
 
-The HTTP OAuth/session/account slice is implemented. Calendar and event reads deliberately return
-`dependency_unavailable` without contacting Google until token refresh and read handlers land in the
-next slice.
+The Worker implements OAuth/session/account lifecycle, serialized token refresh, principal-scoped
+Calendar discovery, and bounded live event pages. Calendar mappings are durable opaque identifiers;
+event bodies and provider event identifiers are never persisted. Provider pagination tokens are
+returned only inside authenticated, expiring cursors.
 
 See:
 

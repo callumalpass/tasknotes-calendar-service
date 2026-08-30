@@ -32,9 +32,22 @@ and values outside the public contract's character bounds fail the page mapping.
 series identifiers are stateless keyed derivations scoped to the environment and
 authorization-resolved calendar.
 
+## Provider-read authority
+
+Refresh attempts are serialized by a D1-clocked, non-stealable lease bound to the exact connection
+generation and token version. Because a refresh may rotate credentials before its response is lost,
+an abandoned attempt requires reconnection rather than repeating the provider side effect. Calendar
+discovery is an idempotent read and uses a separately bounded, stealable lease. Only one complete
+terminal Calendar List page may atomically replace mappings and advance its discovery version.
+
+Event cursors are opened only after principal-scoped calendar authorization and before any token or
+provider operation. They authenticate the principal, connection generation, public calendar, exact
+range, and private provider page token. Provider results are released only after current connection
+authority is rechecked.
+
 ## Data lifecycle
 
-Connection identity, encrypted tokens, device sessions, OAuth transactions, and revocation
-generations are durable security state. Event responses are live bounded provider reads. The initial
-architecture has no event mirror, event mapping table, or event cache; introducing any retained
-event content requires a later accepted ADR.
+Connection identity, encrypted tokens, device sessions, OAuth transactions, revocation generations,
+and opaque calendar mappings are durable security state. Event responses are live bounded provider
+reads. The initial architecture has no event mirror, event mapping table, or event cache;
+introducing any retained event content requires a later accepted ADR.
