@@ -467,6 +467,68 @@ describe("Worker HTTP OAuth and account slice", () => {
     ).toMatchObject({ results: [] });
   });
 
+  it("maps provider discovery and event failures without leaking provider details", async () => {
+    await configure({
+      calendarEnabled: true,
+      calendarPages: [
+        {
+          items: [
+            {
+              id: "failure-private-calendar",
+              summary: "Failure calendar",
+              accessRole: "reader",
+            },
+          ],
+        },
+      ],
+      eventPages: [{ calendarId: "failure-private-calendar", items: [] }],
+    });
+    const signedIn = await signIn("Failure mapping");
+    await connect(signedIn.credential);
+    const discoveryFailures = [
+      ["permission_denied", 409, "conflict"],
+      ["quota_exceeded", 429, "rate_limited"],
+      ["rate_limited", 429, "rate_limited"],
+      ["not_found", 503, "dependency_unavailable"],
+      ["server_error", 503, "dependency_unavailable"],
+      ["malformed_shape", 503, "dependency_unavailable"],
+      ["oversized_declared", 503, "dependency_unavailable"],
+    ] as const;
+    for (const [mode, status, code] of discoveryFailures) {
+      await configure({ calendar: mode });
+      const response = await api("/v1/calendars", {}, signedIn.credential);
+      expect(response.status).toBe(status);
+      const body = await response.text();
+      expect(body).toContain(code);
+      expect(body).not.toContain("failure-private-calendar");
+    }
+    const discovery = await api("/v1/calendars", {}, signedIn.credential);
+    const calendarId = (await discovery.json<{ calendars: { id: string }[] }>()).calendars[0]?.id;
+    if (calendarId === undefined) throw new Error("expected failure-test calendar");
+    const range = "start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z";
+    const eventFailures = [
+      ["permission_denied", 404, "resource_not_found"],
+      ["not_found", 404, "resource_not_found"],
+      ["quota_exceeded", 429, "rate_limited"],
+      ["rate_limited", 429, "rate_limited"],
+      ["server_error", 503, "dependency_unavailable"],
+      ["malformed_json", 503, "dependency_unavailable"],
+      ["oversized_streamed", 503, "dependency_unavailable"],
+    ] as const;
+    for (const [mode, status, code] of eventFailures) {
+      await configure({ calendar: mode });
+      const response = await api(
+        `/v1/calendars/${calendarId}/events?${range}`,
+        {},
+        signedIn.credential,
+      );
+      expect(response.status).toBe(status);
+      const body = await response.text();
+      expect(body).toContain(code);
+      expect(body).not.toContain("failure-private-calendar");
+    }
+  });
+
   it("lists and principal-binds devices, then account deletion invalidates the credential", async () => {
     const first = await signIn("First device");
     const second = await signIn("Second device");

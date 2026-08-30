@@ -183,7 +183,6 @@ function initialize(env: Env): RuntimeConfiguration {
     tokenKeyring,
     googleProvider,
     fetch: outboundFetch,
-    nowEpochSeconds,
     random: webCryptoRandom,
     sleep,
     providerTimeoutMs: 8_000,
