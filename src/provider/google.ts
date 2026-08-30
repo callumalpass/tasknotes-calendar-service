@@ -624,6 +624,8 @@ export async function listGoogleEventsPage(
   );
   url.searchParams.set("maxResults", String(MAX_ITEMS));
   url.searchParams.set("singleEvents", "true");
+  url.searchParams.set("showDeleted", "true");
+  url.searchParams.set("orderBy", "startTime");
   url.searchParams.set("timeMin", request.timeMin);
   url.searchParams.set("timeMax", request.timeMax);
   if (!addPageToken(url, request.pageToken)) return invalidRequest();

@@ -226,6 +226,8 @@ describe("Google provider HTTP boundary", () => {
     );
     expect(requested?.searchParams.get("pageToken")).toBe("opaque+/=?& token");
     expect(requested?.searchParams.get("singleEvents")).toBe("true");
+    expect(requested?.searchParams.get("showDeleted")).toBe("true");
+    expect(requested?.searchParams.get("orderBy")).toBe("startTime");
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected successful event page");
     expect(result.value.items[0]).toEqual({
