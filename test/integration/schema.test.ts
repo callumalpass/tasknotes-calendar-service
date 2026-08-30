@@ -300,6 +300,113 @@ describe("initial D1 schema invariants", () => {
     ).rejects.toThrow();
   });
 
+  it("enforces the forward redemption foreign key, uniqueness, and cleanup behavior", async () => {
+    await insertPrincipal("principal-a");
+    await insertPendingSignIn("transaction-a");
+
+    const foreignKeys = await testEnv.DB.prepare("PRAGMA foreign_key_list(device_sessions)").all<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>();
+    expect(foreignKeys.results).toContainEqual(
+      expect.objectContaining({
+        table: "oauth_transactions",
+        from: "redemption_transaction_id",
+        to: "id",
+        on_delete: "SET NULL",
+      }),
+    );
+
+    await testEnv.DB.prepare(
+      `INSERT INTO device_sessions
+        (id, principal_id, credential_hash, device_name, client_kind, created_at,
+         last_used_at, idle_expires_at, absolute_expires_at, redemption_transaction_id)
+       VALUES ('session-a', 'principal-a', 'digest-a', 'Browser', 'web', ?, ?, ?, ?,
+               'transaction-a')`,
+    )
+      .bind(NOW, NOW, NOW + 100, NOW + 200)
+      .run();
+    await expect(
+      testEnv.DB.prepare(
+        `INSERT INTO device_sessions
+          (id, principal_id, credential_hash, device_name, client_kind, created_at,
+           last_used_at, idle_expires_at, absolute_expires_at, redemption_transaction_id)
+         VALUES ('session-b', 'principal-a', 'digest-b', 'Phone', 'ios', ?, ?, ?, ?,
+                 'transaction-a')`,
+      )
+        .bind(NOW, NOW, NOW + 100, NOW + 200)
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      testEnv.DB.prepare(
+        `INSERT INTO device_sessions
+          (id, principal_id, credential_hash, device_name, client_kind, created_at,
+           last_used_at, idle_expires_at, absolute_expires_at, redemption_transaction_id)
+         VALUES ('session-missing', 'principal-a', 'digest-missing', 'Phone', 'ios', ?, ?, ?, ?,
+                 'missing-transaction')`,
+      )
+        .bind(NOW, NOW, NOW + 100, NOW + 200)
+        .run(),
+    ).rejects.toThrow();
+
+    await testEnv.DB.prepare("DELETE FROM oauth_transactions WHERE id = 'transaction-a'").run();
+    await expect(
+      testEnv.DB.prepare(
+        "SELECT redemption_transaction_id FROM device_sessions WHERE id = 'session-a'",
+      ).first("redemption_transaction_id"),
+    ).resolves.toBeNull();
+    await expect(
+      testEnv.DB.prepare("SELECT COUNT(*) AS count FROM device_sessions").first("count"),
+    ).resolves.toBe(1);
+  });
+
+  it("forbids changes to the complete OAuth PKCE and client binding", async () => {
+    await insertPendingSignIn("transaction-immutable");
+    const updates: readonly (readonly [string, string | number])[] = [
+      ["provider_pkce_schema_version", 1],
+      ["provider_pkce_key_version", 2],
+      ["provider_pkce_dek_iv", "changed-dek-iv"],
+      ["provider_pkce_wrapped_dek", "changed-wrapped-dek"],
+      ["provider_pkce_payload_iv", "changed-payload-iv"],
+      ["provider_pkce_ciphertext", "changed-ciphertext"],
+      ["device_name", "Changed browser"],
+      ["client_kind", "ios"],
+    ];
+
+    for (const [column, value] of updates) {
+      await expect(
+        testEnv.DB.prepare(
+          `UPDATE oauth_transactions SET ${column} = ? WHERE id = 'transaction-immutable'`,
+        )
+          .bind(value)
+          .run(),
+      ).rejects.toThrow("oauth transaction binding is immutable");
+    }
+  });
+
+  it("rejects the unreleased reconnect OAuth intent", async () => {
+    await insertPrincipal("principal-a");
+    await insertIdentity("identity-a", "principal-a", "subject-a");
+    await expect(
+      testEnv.DB.prepare(
+        `INSERT INTO oauth_transactions
+          (id, intent, status, state_hash, nonce_hash, polling_secret_hash,
+           tasknotes_pkce_challenge, provider_pkce_schema_version, provider_pkce_key_version,
+           provider_pkce_dek_iv, provider_pkce_wrapped_dek, provider_pkce_payload_iv,
+           provider_pkce_ciphertext, authenticated_principal_id, expected_identity_id,
+           device_name, client_kind, created_at, expires_at)
+         VALUES ('transaction-reconnect', 'reconnect', 'pending', 'state-reconnect',
+                 'nonce-reconnect', 'poll-reconnect', 'challenge-reconnect', 1, 1, 'dek',
+                 'wrapped', 'payload', 'ciphertext', 'principal-a', 'identity-a',
+                 'Browser', 'web', ?, ?)`,
+      )
+        .bind(NOW, NOW + 600)
+        .run(),
+    ).rejects.toThrow();
+  });
+
   it("enforces OAuth intent, state, timestamp, and transition invariants", async () => {
     await insertPendingSignIn("transaction-a");
     await expect(

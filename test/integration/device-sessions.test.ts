@@ -37,10 +37,12 @@ interface StoredSession {
   principal_id: string;
   credential_hash: string;
   device_name: string;
+  client_kind: string;
   last_used_at: number;
   idle_expires_at: number;
   absolute_expires_at: number;
   revoked_at: number | null;
+  redemption_transaction_id: string | null;
 }
 
 let clock: MutableClock;
@@ -66,10 +68,87 @@ async function addGoogleIdentity(id: string, principalId: string, subject: strin
     .run();
 }
 
+async function addAuthorizedSignIn(
+  id: string,
+  principalId: string,
+  identityId: string,
+  overrides: { pollingDigest?: string; challenge?: string; expiresAt?: number } = {},
+): Promise<void> {
+  const now = START / 1_000;
+  await testEnv.DB.prepare(
+    `INSERT INTO oauth_transactions
+      (id, intent, status, state_hash, nonce_hash, polling_secret_hash,
+       tasknotes_pkce_challenge, provider_pkce_schema_version, provider_pkce_key_version,
+       provider_pkce_dek_iv, provider_pkce_wrapped_dek, provider_pkce_payload_iv,
+       provider_pkce_ciphertext, authorized_principal_id, authorized_identity_id,
+       device_name, client_kind, created_at, expires_at, callback_completed_at)
+     VALUES (?, 'sign_in', 'authorized', ?, ?, ?, ?, 1, 1, 'dek-iv', 'wrapped-dek',
+             'payload-iv', 'ciphertext', ?, ?, 'Redeemed browser', 'web', ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      `state-${id}`,
+      `nonce-${id}`,
+      overrides.pollingDigest ?? `poll-${id}`,
+      overrides.challenge ?? `challenge-${id}`,
+      principalId,
+      identityId,
+      now - 10,
+      overrides.expiresAt ?? now + 600,
+      now,
+    )
+    .run();
+}
+
+async function addAuthorizedConnect(
+  id: string,
+  principalId: string,
+  identityId: string,
+): Promise<void> {
+  const now = START / 1_000;
+  await testEnv.DB.prepare(
+    `INSERT INTO connections
+      (id, principal_id, identity_id, provider, status, generation,
+       envelope_schema_version, key_version, dek_iv, wrapped_dek, payload_iv, ciphertext,
+       token_version, created_at, updated_at)
+     VALUES (?, ?, ?, 'google', 'active', 1, 1, 1, 'dek', 'wrapped', 'payload',
+             'ciphertext', 1, ?, ?)`,
+  )
+    .bind(`connection-${id}`, principalId, identityId, now, now)
+    .run();
+  await testEnv.DB.prepare(
+    `INSERT INTO oauth_transactions
+      (id, intent, status, state_hash, nonce_hash, polling_secret_hash,
+       tasknotes_pkce_challenge, provider_pkce_schema_version, provider_pkce_key_version,
+       provider_pkce_dek_iv, provider_pkce_wrapped_dek, provider_pkce_payload_iv,
+       provider_pkce_ciphertext, authenticated_principal_id, expected_identity_id,
+       authorized_principal_id, authorized_identity_id, authorized_connection_id,
+       device_name, client_kind, created_at, expires_at, callback_completed_at)
+     VALUES (?, 'connect_calendar', 'authorized', ?, ?, ?, ?, 1, 1, 'dek-iv', 'wrapped-dek',
+             'payload-iv', 'ciphertext', ?, ?, ?, ?, ?, 'Browser', 'web', ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      `state-${id}`,
+      `nonce-${id}`,
+      `poll-${id}`,
+      `challenge-${id}`,
+      principalId,
+      identityId,
+      principalId,
+      identityId,
+      `connection-${id}`,
+      now - 10,
+      now + 600,
+      now,
+    )
+    .run();
+}
+
 async function storedSession(id: string): Promise<StoredSession> {
   const row = await testEnv.DB.prepare(
-    `SELECT id, principal_id, credential_hash, device_name, last_used_at,
-            idle_expires_at, absolute_expires_at, revoked_at
+    `SELECT id, principal_id, credential_hash, device_name, client_kind, last_used_at,
+            idle_expires_at, absolute_expires_at, revoked_at, redemption_transaction_id
      FROM device_sessions WHERE id = ?`,
   )
     .bind(id)
@@ -332,5 +411,214 @@ describe("device sessions against migrated D1", () => {
           random: new CountingRandom(),
         }),
     ).toThrow("session pepper must be exactly 32 bytes");
+  });
+
+  it("atomically redeems an authorized sign-in once without storing the credential", async () => {
+    await addPrincipal("principal-a");
+    await addGoogleIdentity("identity-a", "principal-a", "subject-a");
+    await addAuthorizedSignIn("transaction-success", "principal-a", "identity-a");
+
+    const redeemed = await sessions.redeemSignInTransaction({
+      transactionId: "transaction-success",
+      expectedPollingDigest: "poll-transaction-success",
+      expectedTasknotesPkceChallenge: "challenge-transaction-success",
+    });
+    expect(redeemed).toMatchObject({
+      deviceName: "Redeemed browser",
+      clientKind: "web",
+      createdAt: new Date(START).toISOString(),
+    });
+    if (redeemed === null) {
+      throw new Error("expected redeemed session");
+    }
+
+    const stored = await storedSession(redeemed.id);
+    expect(stored.redemption_transaction_id).toBe("transaction-success");
+    expect(stored.credential_hash).not.toBe(redeemed.credential);
+    expect(JSON.stringify(stored)).not.toContain(redeemed.credential);
+    expect(JSON.stringify(stored)).not.toContain(redeemed.credential.split(".")[2]);
+    await expect(sessions.authenticate(redeemed.credential)).resolves.toMatchObject({
+      principalId: "principal-a",
+      session: { id: redeemed.id },
+    });
+    await expect(
+      testEnv.DB.prepare(
+        "SELECT status, consumed_at, typeof(consumed_at) AS consumed_type FROM oauth_transactions WHERE id = ?",
+      )
+        .bind("transaction-success")
+        .first(),
+    ).resolves.toEqual({
+      status: "consumed",
+      consumed_at: START / 1_000,
+      consumed_type: "integer",
+    });
+
+    const ordinary = await sessions.create({
+      principalId: "principal-a",
+      deviceName: "Ordinary",
+      clientKind: "ios",
+    });
+    expect((await storedSession(ordinary.id)).redemption_transaction_id).toBeNull();
+  });
+
+  it("allows exactly one winner across twenty concurrent redemptions and rejects replay", async () => {
+    await addPrincipal("principal-a");
+    await addGoogleIdentity("identity-a", "principal-a", "subject-a");
+    await addAuthorizedSignIn("transaction-race", "principal-a", "identity-a");
+    const input = {
+      transactionId: "transaction-race",
+      expectedPollingDigest: "poll-transaction-race",
+      expectedTasknotesPkceChallenge: "challenge-transaction-race",
+    } as const;
+
+    const attempts = await Promise.all(
+      Array.from({ length: 20 }, async () => sessions.redeemSignInTransaction(input)),
+    );
+    const winners = attempts.filter((attempt) => attempt !== null);
+    expect(winners).toHaveLength(1);
+    await expect(
+      testEnv.DB.prepare(
+        "SELECT COUNT(*) AS count FROM device_sessions WHERE redemption_transaction_id = ?",
+      )
+        .bind("transaction-race")
+        .first("count"),
+    ).resolves.toBe(1);
+    await expect(sessions.redeemSignInTransaction(input)).resolves.toBeNull();
+    await expect(
+      testEnv.DB.prepare("SELECT COUNT(*) AS count FROM device_sessions").first("count"),
+    ).resolves.toBe(1);
+  });
+
+  it("returns unavailable for mismatched binding, intent, expiry, and deleted principal", async () => {
+    await addPrincipal("principal-a");
+    await addGoogleIdentity("identity-a", "principal-a", "subject-a");
+    await addAuthorizedSignIn("transaction-binding", "principal-a", "identity-a");
+    const input = {
+      transactionId: "transaction-binding",
+      expectedPollingDigest: "poll-transaction-binding",
+      expectedTasknotesPkceChallenge: "challenge-transaction-binding",
+    } as const;
+
+    await expect(
+      sessions.redeemSignInTransaction({ ...input, expectedPollingDigest: "wrong-poll" }),
+    ).resolves.toBeNull();
+    await expect(
+      sessions.redeemSignInTransaction({
+        ...input,
+        expectedTasknotesPkceChallenge: "wrong-challenge",
+      }),
+    ).resolves.toBeNull();
+
+    await addAuthorizedConnect("transaction-connect", "principal-a", "identity-a");
+    await expect(
+      sessions.redeemSignInTransaction({
+        transactionId: "transaction-connect",
+        expectedPollingDigest: "poll-transaction-connect",
+        expectedTasknotesPkceChallenge: "challenge-transaction-connect",
+      }),
+    ).resolves.toBeNull();
+
+    await addAuthorizedSignIn("transaction-expired", "principal-a", "identity-a", {
+      expiresAt: START / 1_000,
+    });
+    await expect(
+      sessions.redeemSignInTransaction({
+        transactionId: "transaction-expired",
+        expectedPollingDigest: "poll-transaction-expired",
+        expectedTasknotesPkceChallenge: "challenge-transaction-expired",
+      }),
+    ).resolves.toBeNull();
+
+    await addPrincipal("principal-deleted");
+    await addGoogleIdentity("identity-deleted", "principal-deleted", "subject-deleted");
+    await addAuthorizedSignIn("transaction-deleted", "principal-deleted", "identity-deleted");
+    await testEnv.DB.prepare("DELETE FROM principals WHERE id = 'principal-deleted'").run();
+    await expect(
+      sessions.redeemSignInTransaction({
+        transactionId: "transaction-deleted",
+        expectedPollingDigest: "poll-transaction-deleted",
+        expectedTasknotesPkceChallenge: "challenge-transaction-deleted",
+      }),
+    ).resolves.toBeNull();
+
+    await expect(
+      testEnv.DB.prepare("SELECT COUNT(*) AS count FROM device_sessions").first("count"),
+    ).resolves.toBe(0);
+  });
+
+  it("does not mint a replacement after a committed response is lost", async () => {
+    await addPrincipal("principal-a");
+    await addGoogleIdentity("identity-a", "principal-a", "subject-a");
+    await addAuthorizedSignIn("transaction-lost", "principal-a", "identity-a");
+    const input = {
+      transactionId: "transaction-lost",
+      expectedPollingDigest: "poll-transaction-lost",
+      expectedTasknotesPkceChallenge: "challenge-transaction-lost",
+    } as const;
+
+    await sessions.redeemSignInTransaction(input); // Simulate committing before the response is lost.
+    await expect(sessions.redeemSignInTransaction(input)).resolves.toBeNull();
+    const rows = await testEnv.DB.prepare(
+      `SELECT credential_hash, redemption_transaction_id
+       FROM device_sessions WHERE redemption_transaction_id = ?`,
+    )
+      .bind("transaction-lost")
+      .all();
+    expect(rows.results).toHaveLength(1);
+    expect(JSON.stringify(rows.results)).not.toContain("v1.");
+  });
+
+  it("retains a redeemed session when transaction cleanup nulls its redemption link", async () => {
+    await addPrincipal("principal-a");
+    await addGoogleIdentity("identity-a", "principal-a", "subject-a");
+    await addAuthorizedSignIn("transaction-cleanup", "principal-a", "identity-a");
+    const redeemed = await sessions.redeemSignInTransaction({
+      transactionId: "transaction-cleanup",
+      expectedPollingDigest: "poll-transaction-cleanup",
+      expectedTasknotesPkceChallenge: "challenge-transaction-cleanup",
+    });
+    if (redeemed === null) {
+      throw new Error("expected redeemed session");
+    }
+
+    await testEnv.DB.prepare("DELETE FROM oauth_transactions WHERE id = ?")
+      .bind("transaction-cleanup")
+      .run();
+    expect((await storedSession(redeemed.id)).redemption_transaction_id).toBeNull();
+    await expect(sessions.authenticate(redeemed.credential)).resolves.not.toBeNull();
+  });
+
+  it("rolls back the inserted session when the consume statement fails", async () => {
+    await addPrincipal("principal-a");
+    await addGoogleIdentity("identity-a", "principal-a", "subject-a");
+    await addAuthorizedSignIn("transaction-trigger", "principal-a", "identity-a");
+    await testEnv.DB.prepare(
+      `CREATE TRIGGER test_reject_consumption
+       BEFORE UPDATE OF status ON oauth_transactions
+       WHEN NEW.status = 'consumed'
+       BEGIN
+         SELECT RAISE(ABORT, 'simulated consume failure');
+       END`,
+    ).run();
+
+    try {
+      await expect(
+        sessions.redeemSignInTransaction({
+          transactionId: "transaction-trigger",
+          expectedPollingDigest: "poll-transaction-trigger",
+          expectedTasknotesPkceChallenge: "challenge-transaction-trigger",
+        }),
+      ).rejects.toThrow("simulated consume failure");
+      await expect(
+        testEnv.DB.prepare("SELECT COUNT(*) AS count FROM device_sessions").first("count"),
+      ).resolves.toBe(0);
+      await expect(
+        testEnv.DB.prepare(
+          "SELECT status FROM oauth_transactions WHERE id = 'transaction-trigger'",
+        ).first("status"),
+      ).resolves.toBe("authorized");
+    } finally {
+      await testEnv.DB.prepare("DROP TRIGGER test_reject_consumption").run();
+    }
   });
 });

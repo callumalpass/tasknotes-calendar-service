@@ -34,6 +34,12 @@ export interface CreateDeviceSessionInput {
   readonly clientKind: DeviceClientKind;
 }
 
+export interface RedeemSignInTransactionInput {
+  readonly transactionId: string;
+  readonly expectedPollingDigest: string;
+  readonly expectedTasknotesPkceChallenge: string;
+}
+
 export interface DeviceSessionMetadata {
   readonly id: string;
   readonly deviceName: string;
@@ -65,6 +71,12 @@ interface SessionRow {
   idle_expires_at: number;
   absolute_expires_at: number;
   revoked_at: number | null;
+}
+
+interface GeneratedCredential {
+  id: string;
+  credential: string;
+  digest: string;
 }
 
 interface MetadataRow {
@@ -174,6 +186,20 @@ async function credentialDigest(
   );
 }
 
+async function generateCredential(
+  pepper: Uint8Array,
+  random: RandomByteSource,
+): Promise<GeneratedCredential> {
+  const sessionIdBytes = randomBytes(random, SESSION_ID_BYTES);
+  const secret = randomBytes(random, CREDENTIAL_SECRET_BYTES);
+  const id = encodeBase64Url(sessionIdBytes);
+  return {
+    id,
+    credential: `${CREDENTIAL_VERSION}.${id}.${encodeBase64Url(secret)}`,
+    digest: encodeBase64Url(await credentialDigest(pepper, sessionIdBytes, secret)),
+  };
+}
+
 function parseCredential(credential: string): { sessionId: Uint8Array; secret: Uint8Array } | null {
   if (credential.length > 80) {
     return null;
@@ -235,11 +261,7 @@ export class DeviceSessions {
     validatePrincipalId(input.principalId);
     validateDevice(input.deviceName, input.clientKind);
     const now = validatedNow(this.#clock);
-    const sessionIdBytes = randomBytes(this.#random, SESSION_ID_BYTES);
-    const secret = randomBytes(this.#random, CREDENTIAL_SECRET_BYTES);
-    const id = encodeBase64Url(sessionIdBytes);
-    const credential = `${CREDENTIAL_VERSION}.${id}.${encodeBase64Url(secret)}`;
-    const digest = encodeBase64Url(await credentialDigest(this.#pepper, sessionIdBytes, secret));
+    const generated = await generateCredential(this.#pepper, this.#random);
     const createdAt = now;
     const idleExpiresAt = now + IDLE_LIFETIME_SECONDS;
     const absoluteExpiresAt = now + ABSOLUTE_LIFETIME_SECONDS;
@@ -248,15 +270,16 @@ export class DeviceSessions {
       .prepare(
         `INSERT INTO device_sessions (
           id, principal_id, credential_hash, device_name, client_kind, created_at,
-          last_used_at, idle_expires_at, absolute_expires_at, revoked_at
+          last_used_at, idle_expires_at, absolute_expires_at, revoked_at,
+          redemption_transaction_id
         )
-        SELECT ?, id, ?, ?, ?, ?, ?, ?, ?, NULL
+        SELECT ?, id, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
         FROM principals
         WHERE id = ?`,
       )
       .bind(
-        id,
-        digest,
+        generated.id,
+        generated.digest,
         input.deviceName,
         input.clientKind,
         createdAt,
@@ -271,8 +294,8 @@ export class DeviceSessions {
     }
 
     return {
-      id,
-      credential,
+      id: generated.id,
+      credential: generated.credential,
       deviceName: input.deviceName,
       clientKind: input.clientKind,
       createdAt: toIso(createdAt),
@@ -280,6 +303,92 @@ export class DeviceSessions {
       idleExpiresAt: toIso(idleExpiresAt),
       absoluteExpiresAt: toIso(absoluteExpiresAt),
       revokedAt: null,
+    };
+  }
+
+  public async redeemSignInTransaction(
+    input: RedeemSignInTransactionInput,
+  ): Promise<CreatedDeviceSession | null> {
+    const now = validatedNow(this.#clock);
+    const generated = await generateCredential(this.#pepper, this.#random);
+    const idleExpiresAt = now + IDLE_LIFETIME_SECONDS;
+    const absoluteExpiresAt = now + ABSOLUTE_LIFETIME_SECONDS;
+
+    const insert = this.#db
+      .prepare(
+        `INSERT INTO device_sessions (
+          id, principal_id, credential_hash, device_name, client_kind, created_at,
+          last_used_at, idle_expires_at, absolute_expires_at, revoked_at,
+          redemption_transaction_id
+        )
+        SELECT ?, transaction_record.authorized_principal_id, ?, transaction_record.device_name,
+               transaction_record.client_kind, ?, ?, ?, ?, NULL, transaction_record.id
+        FROM oauth_transactions AS transaction_record
+        JOIN principals AS principal ON principal.id = transaction_record.authorized_principal_id
+        WHERE transaction_record.id = ?
+          AND transaction_record.intent = 'sign_in'
+          AND transaction_record.status = 'authorized'
+          AND transaction_record.polling_secret_hash = ?
+          AND transaction_record.tasknotes_pkce_challenge = ?
+          AND transaction_record.expires_at > ?
+          AND transaction_record.authorized_principal_id IS NOT NULL
+        RETURNING id, device_name, client_kind, created_at, last_used_at,
+                  idle_expires_at, absolute_expires_at, revoked_at`,
+      )
+      .bind(
+        generated.id,
+        generated.digest,
+        now,
+        now,
+        idleExpiresAt,
+        absoluteExpiresAt,
+        input.transactionId,
+        input.expectedPollingDigest,
+        input.expectedTasknotesPkceChallenge,
+        now,
+      );
+    const consume = this.#db
+      .prepare(
+        `UPDATE oauth_transactions
+         SET status = 'consumed', consumed_at = ?
+         WHERE id = ?
+           AND intent = 'sign_in'
+           AND status = 'authorized'
+           AND polling_secret_hash = ?
+           AND tasknotes_pkce_challenge = ?
+           AND expires_at > ?
+           AND authorized_principal_id IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+             FROM device_sessions
+             WHERE id = ?
+               AND redemption_transaction_id = oauth_transactions.id
+               AND principal_id = oauth_transactions.authorized_principal_id
+           )`,
+      )
+      .bind(
+        now,
+        input.transactionId,
+        input.expectedPollingDigest,
+        input.expectedTasknotesPkceChallenge,
+        now,
+        generated.id,
+      );
+
+    const [insertResult, consumeResult] = await this.#db.batch<MetadataRow>([insert, consume]);
+    const insertedRow = insertResult?.results[0];
+    if (
+      insertResult?.meta.changes !== 1 ||
+      consumeResult?.meta.changes !== 1 ||
+      insertResult.results.length !== 1 ||
+      insertedRow === undefined
+    ) {
+      return null;
+    }
+
+    return {
+      ...metadata(insertedRow),
+      credential: generated.credential,
     };
   }
 

@@ -37,7 +37,9 @@ CREATE TABLE device_sessions (
   last_used_at INTEGER NOT NULL CHECK (last_used_at >= created_at),
   idle_expires_at INTEGER NOT NULL CHECK (idle_expires_at > last_used_at),
   absolute_expires_at INTEGER NOT NULL CHECK (absolute_expires_at >= idle_expires_at),
-  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+  revoked_at INTEGER CHECK (revoked_at IS NULL OR revoked_at >= created_at),
+  redemption_transaction_id TEXT UNIQUE
+    REFERENCES oauth_transactions(id) ON DELETE SET NULL
 ) STRICT;
 CREATE INDEX device_sessions_principal_idx ON device_sessions(principal_id);
 CREATE INDEX device_sessions_expiry_idx ON device_sessions(idle_expires_at, absolute_expires_at);
@@ -124,7 +126,7 @@ CREATE INDEX calendars_connection_idx ON calendars(principal_id, connection_id);
 
 CREATE TABLE oauth_transactions (
   id TEXT PRIMARY KEY,
-  intent TEXT NOT NULL CHECK (intent IN ('sign_in', 'connect_calendar', 'reconnect')),
+  intent TEXT NOT NULL CHECK (intent IN ('sign_in', 'connect_calendar')),
   status TEXT NOT NULL CHECK (
     status IN ('pending', 'processing', 'authorized', 'failed', 'consumed')
   ),
@@ -163,7 +165,7 @@ CREATE TABLE oauth_transactions (
       AND authenticated_principal_id IS NULL
       AND expected_identity_id IS NULL)
     OR
-    (intent IN ('connect_calendar', 'reconnect')
+    (intent = 'connect_calendar'
       AND authenticated_principal_id IS NOT NULL
       AND expected_identity_id IS NOT NULL)
   ),
@@ -202,7 +204,7 @@ CREATE TABLE oauth_transactions (
       AND (
         (intent = 'sign_in' AND authorized_connection_id IS NULL)
         OR
-        (intent IN ('connect_calendar', 'reconnect')
+        (intent = 'connect_calendar'
           AND authorized_connection_id IS NOT NULL
           AND authorized_principal_id = authenticated_principal_id
           AND authorized_identity_id = expected_identity_id)
@@ -233,7 +235,7 @@ CREATE TABLE oauth_transactions (
       AND (
         (intent = 'sign_in' AND authorized_connection_id IS NULL)
         OR
-        (intent IN ('connect_calendar', 'reconnect')
+        (intent = 'connect_calendar'
           AND authorized_connection_id IS NOT NULL
           AND authorized_principal_id = authenticated_principal_id
           AND authorized_identity_id = expected_identity_id)
@@ -262,8 +264,16 @@ BEFORE UPDATE OF
   nonce_hash,
   polling_secret_hash,
   tasknotes_pkce_challenge,
+  provider_pkce_schema_version,
+  provider_pkce_key_version,
+  provider_pkce_dek_iv,
+  provider_pkce_wrapped_dek,
+  provider_pkce_payload_iv,
+  provider_pkce_ciphertext,
   authenticated_principal_id,
   expected_identity_id,
+  device_name,
+  client_kind,
   created_at,
   expires_at
 ON oauth_transactions
