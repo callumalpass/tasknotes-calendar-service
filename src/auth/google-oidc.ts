@@ -443,6 +443,8 @@ export async function exchangeGoogleSignInCode(
   dependencies: GoogleOidcDependencies,
 ): Promise<GoogleIdentity> {
   const tokens = await exchangeCode(endpoints, client, input, dependencies);
+  const granted = new Set(tokens.scopes);
+  if (IDENTITY_SCOPES.some((scope) => !granted.has(scope))) fail("insufficient_scope");
   return verifyIdentity(tokens.idToken, input.expectedNonce, client.clientId, dependencies);
 }
 

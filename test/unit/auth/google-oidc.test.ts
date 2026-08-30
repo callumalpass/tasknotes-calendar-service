@@ -204,6 +204,15 @@ describe("Google code exchange and ID token verification", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("rejects sign-in when any requested identity scope is missing", async () => {
+    const response = jsonResponse(await tokenPayload({ scope: "openid email" }));
+
+    await expectCode(
+      exchangeGoogleSignInCode(endpoints, client, exchangeInput, dependencies(response)),
+      "insufficient_scope",
+    );
+  });
+
   it("accepts and canonicalizes Google's bare issuer spelling", async () => {
     const response = jsonResponse(
       await tokenPayload({ id_token: await signedToken(claims({ iss: "accounts.google.com" })) }),
