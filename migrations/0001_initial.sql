@@ -50,8 +50,12 @@ CREATE TABLE external_identities (
     AND instr(subject, char(31)) = 0
     AND instr(subject, char(127)) = 0
   ),
-  email TEXT,
-  display_name TEXT,
+  email TEXT CHECK (
+    email IS NULL OR length(CAST(email AS BLOB)) BETWEEN 1 AND 2048
+  ),
+  display_name TEXT CHECK (
+    display_name IS NULL OR length(CAST(display_name AS BLOB)) BETWEEN 1 AND 2048
+  ),
   email_verified INTEGER NOT NULL CHECK (email_verified IN (0, 1)),
   created_at INTEGER NOT NULL CHECK (created_at >= 0),
   updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
@@ -68,6 +72,7 @@ WHEN NEW.id IS NOT OLD.id
   OR NEW.provider IS NOT OLD.provider
   OR NEW.issuer IS NOT OLD.issuer
   OR NEW.subject IS NOT OLD.subject
+  OR NEW.updated_at < OLD.updated_at
 BEGIN
   SELECT RAISE(ABORT, 'external identity is immutable');
 END;
@@ -580,6 +585,25 @@ WHEN NEW.id IS NOT OLD.id
   )
 BEGIN
   SELECT RAISE(ABORT, 'oauth transaction binding is immutable');
+END;
+
+CREATE TRIGGER oauth_transactions_cleanup_expired_authorized_connect
+AFTER UPDATE ON oauth_transactions
+FOR EACH ROW
+WHEN OLD.intent = 'connect_calendar'
+  AND OLD.status = 'authorized'
+  AND NEW.status = 'expired'
+BEGIN
+  DELETE FROM connections
+  WHERE id = OLD.authorized_connection_id
+    AND principal_id = OLD.authorized_principal_id
+    AND identity_id = OLD.authorized_identity_id
+    AND generation = OLD.target_connection_generation
+    AND EXISTS (
+      SELECT 1 FROM principals
+      WHERE id = OLD.authorized_principal_id
+        AND google_connection_generation = OLD.target_connection_generation
+    );
 END;
 
 CREATE TABLE device_sessions (

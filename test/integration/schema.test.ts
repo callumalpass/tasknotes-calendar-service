@@ -122,7 +122,7 @@ beforeEach(async () => {
 });
 
 describe("initial D1 schema invariants", () => {
-  it("bounds and freezes Google identity while leaving metadata mutable", async () => {
+  it("bounds identity metadata and freezes immutable identity and timestamp rollback", async () => {
     await principal();
     await identity();
     await expect(
@@ -130,6 +130,23 @@ describe("initial D1 schema invariants", () => {
         "UPDATE external_identities SET id = id, principal_id = principal_id, subject = subject, email = 'new@example.test' WHERE id = 'identity-a'",
       ).run(),
     ).resolves.toMatchObject({ meta: { changes: 1 } });
+    for (const [column, value] of [
+      ["email", ""],
+      ["email", "x".repeat(2049)],
+      ["display_name", ""],
+      ["display_name", "é".repeat(1025)],
+    ] as const) {
+      await expect(
+        testEnv.DB.prepare(`UPDATE external_identities SET ${column} = ? WHERE id = 'identity-a'`)
+          .bind(value)
+          .run(),
+      ).rejects.toThrow();
+    }
+    await expect(
+      testEnv.DB.prepare(
+        "UPDATE external_identities SET updated_at = updated_at - 1 WHERE id = 'identity-a'",
+      ).run(),
+    ).rejects.toThrow("external identity is immutable");
 
     for (const subject of [
       "",

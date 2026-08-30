@@ -33,7 +33,7 @@ import type {
   TransactionStatusResponse,
 } from "../contracts/transactions";
 import { TransactionIdSchema, UuidSchema } from "../contracts/common";
-import { encodeBase64Url } from "../crypto/base64url";
+import { decodeBase64Url, encodeBase64Url } from "../crypto/base64url";
 import { sha256 } from "../crypto/digest";
 import { createPkceS256Challenge, isValidPkceVerifier } from "../crypto/pkce";
 import { randomBytes } from "../crypto/random";
@@ -41,6 +41,7 @@ import type { RandomByteSource } from "../crypto/random";
 import { encryptTokenEnvelope } from "../crypto/token-envelope";
 import type { KeyEncryptionKeyring } from "../crypto/token-envelope";
 import { tokenEnvelopeToRow } from "../storage/token-envelope-row";
+import type { TokenEnvelopeRow } from "../storage/token-envelope-row";
 
 const TRANSACTION_LIFETIME_SECONDS = 600;
 const EXCHANGE_DEADLINE_SECONDS = 30;
@@ -120,6 +121,12 @@ interface StatusRow extends CapabilityRow {
   failure_code: string | null;
 }
 
+interface ConnectRecoveryRow {
+  transaction_status: string;
+  expires_at: number;
+  exact_connection: number;
+}
+
 function fail(code: OAuthTransactionErrorCode): never {
   throw new OAuthTransactionError(code);
 }
@@ -148,6 +155,16 @@ function validateTransactionId(value: unknown): string {
   return parsed.data;
 }
 
+function isCanonicalSecret(value: unknown, bytes: number): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    decodeBase64Url(value, { minBytes: bytes, maxBytes: bytes });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validateStart(value: unknown): TransactionStartRequest {
   const parsed = TransactionStartRequestSchema.safeParse(value);
   if (!parsed.success) return fail("invalid_request");
@@ -170,7 +187,13 @@ function iso(value: number): string {
 function boundedString(value: unknown, maximumBytes: number, required = true): value is string {
   if (value === undefined && !required) return true;
   if (typeof value !== "string" || value.length === 0) return false;
-  return textEncoder.encode(value).length <= maximumBytes;
+  return (
+    textEncoder.encode(value).length <= maximumBytes &&
+    !Array.from(value).some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code <= 0x1f || code === 0x7f;
+    })
+  );
 }
 
 function validIdentity(value: unknown): value is GoogleIdentity {
@@ -180,10 +203,6 @@ function validIdentity(value: unknown): value is GoogleIdentity {
   if (
     identity["issuer"] !== CANONICAL_ISSUER ||
     !boundedString(subject, 255) ||
-    Array.from(subject).some((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return code <= 0x1f || code === 0x7f;
-    }) ||
     !boundedString(identity["email"], 2_048, false) ||
     !boundedString(identity["name"], 2_048, false) ||
     (identity["emailVerified"] !== undefined && typeof identity["emailVerified"] !== "boolean")
@@ -257,7 +276,12 @@ export class OAuthTransactions {
 
   public async startSignIn(request: TransactionStartRequest): Promise<TransactionStartResponse> {
     const input = validateStart(request);
-    return this.#start("sign_in", null, input);
+    try {
+      return await this.#start("sign_in", null, input);
+    } catch (error) {
+      if (error instanceof OAuthTransactionError) throw error;
+      return fail("internal");
+    }
   }
 
   public async startConnect(
@@ -266,7 +290,12 @@ export class OAuthTransactions {
   ): Promise<TransactionStartResponse> {
     const principalId = validatePrincipal(authenticatedPrincipalId);
     const input = validateStart(request);
-    return this.#start("connect_calendar", principalId, input);
+    try {
+      return await this.#start("connect_calendar", principalId, input);
+    } catch (error) {
+      if (error instanceof OAuthTransactionError) throw error;
+      return fail("internal");
+    }
   }
 
   async #start(
@@ -289,6 +318,23 @@ export class OAuthTransactions {
       digest(nonce),
       createPkceS256Challenge(providerVerifier),
     ]);
+    let authorizationUrl: URL;
+    try {
+      authorizationUrl =
+        intent === "sign_in"
+          ? createGoogleSignInAuthorizationUrl(
+              this.#dependencies.google.endpoints,
+              this.#dependencies.google.client,
+              { state, nonce, codeChallenge: providerChallenge },
+            )
+          : createGoogleCalendarAuthorizationUrl(
+              this.#dependencies.google.endpoints,
+              this.#dependencies.google.client,
+              { state, nonce, codeChallenge: providerChallenge, calendarScopes: [CALENDAR_SCOPE] },
+            );
+    } catch {
+      return fail("internal");
+    }
     const envelope = oauthTransactionProviderPkceEnvelopeToRow(
       await encryptOAuthTransactionProviderPkce(
         providerVerifier,
@@ -373,44 +419,26 @@ export class OAuthTransactions {
     } catch (error) {
       if (error instanceof OAuthTransactionError) throw error;
       if (intent === "connect_calendar" && principalId !== null) {
-        const active = await this.#dependencies.db
-          .prepare(
-            `SELECT 1 FROM oauth_transactions
-             WHERE authenticated_principal_id = ? AND intent = 'connect_calendar'
-               AND status IN ('pending', 'exchanging') LIMIT 1`,
-          )
-          .bind(principalId)
-          .first();
-        if (active !== null) return fail("conflict");
-        const ownedIdentity = await this.#dependencies.db
-          .prepare(
-            `SELECT 1 FROM principals AS principal
-             JOIN external_identities AS identity_record ON identity_record.principal_id = principal.id
-             WHERE principal.id = ? AND identity_record.provider = 'google'
-               AND identity_record.issuer = 'https://accounts.google.com' LIMIT 1`,
-          )
-          .bind(principalId)
-          .first();
-        if (ownedIdentity === null) return fail("not_found");
+        try {
+          const active = await this.#dependencies.db
+            .prepare(
+              `SELECT 1 FROM oauth_transactions
+               WHERE authenticated_principal_id = ? AND intent = 'connect_calendar'
+                 AND status IN ('pending', 'exchanging') LIMIT 1`,
+            )
+            .bind(principalId)
+            .first();
+          if (active !== null) return fail("conflict");
+        } catch (diagnosticError) {
+          if (diagnosticError instanceof OAuthTransactionError) throw diagnosticError;
+        }
       }
       return fail("internal");
     }
 
-    const url =
-      intent === "sign_in"
-        ? createGoogleSignInAuthorizationUrl(
-            this.#dependencies.google.endpoints,
-            this.#dependencies.google.client,
-            { state, nonce, codeChallenge: providerChallenge },
-          )
-        : createGoogleCalendarAuthorizationUrl(
-            this.#dependencies.google.endpoints,
-            this.#dependencies.google.client,
-            { state, nonce, codeChallenge: providerChallenge, calendarScopes: [CALENDAR_SCOPE] },
-          );
     return {
       transaction_id: transactionId,
-      authorization_url: url.href,
+      authorization_url: authorizationUrl.href,
       polling_secret: pollingSecret,
       expires_at: iso(expiresAt),
     };
@@ -443,7 +471,7 @@ export class OAuthTransactions {
     pollingSecret: string,
   ): Promise<TransactionStatusResponse> {
     const transactionId = validateTransactionId(transactionIdValue);
-    if (!/^[A-Za-z0-9_-]{43}$/u.test(pollingSecret)) return fail("invalid_request");
+    if (!isCanonicalSecret(pollingSecret, 32)) return fail("invalid_request");
     const pollingHash = await digest(pollingSecret);
     const timestamp = now(this.#dependencies);
     const authority =
@@ -502,6 +530,14 @@ export class OAuthTransactions {
   }
 
   public async callback(query: ProviderCallbackQuery): Promise<OAuthCallbackResult> {
+    try {
+      return await this.#callbackUnsafe(query);
+    } catch {
+      return { status: "complete" };
+    }
+  }
+
+  async #callbackUnsafe(query: ProviderCallbackQuery): Promise<OAuthCallbackResult> {
     const parsed = ProviderCallbackQuerySchema.safeParse(query);
     if (!parsed.success) return fail("invalid_request");
     const stateHash = await digest(parsed.data.state);
@@ -511,14 +547,19 @@ export class OAuthTransactions {
         await this.#dependencies.db
           .prepare(
             `UPDATE oauth_transactions
-             SET status = 'failed', failure_code = ?, callback_completed_at = ?,
+             SET status = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'failed' END,
+                 failure_code = CASE WHEN expires_at <= ? THEN NULL ELSE ? END,
+                 callback_completed_at = CASE WHEN expires_at <= ? THEN NULL ELSE ? END,
                  provider_pkce_schema_version = NULL, provider_pkce_key_version = NULL,
                  provider_pkce_dek_iv = NULL, provider_pkce_wrapped_dek = NULL,
                  provider_pkce_payload_iv = NULL, provider_pkce_ciphertext = NULL
              WHERE state_hash = ? AND status = 'pending'`,
           )
           .bind(
+            timestamp,
+            timestamp,
             parsed.data.error === "access_denied" ? "access_denied" : "authorization_failed",
+            timestamp,
             timestamp,
             stateHash,
           )
@@ -545,6 +586,10 @@ export class OAuthTransactions {
       return { status: "complete" };
     }
     if (pending === null) return { status: "complete" };
+    if (timestamp >= pending.expires_at) {
+      await this.#expirePending(stateHash, timestamp);
+      return { status: "complete" };
+    }
 
     let verifier: string;
     try {
@@ -561,7 +606,6 @@ export class OAuthTransactions {
       await this.#failPending(stateHash, timestamp);
       return { status: "complete" };
     }
-    if (timestamp >= pending.expires_at) return { status: "complete" };
 
     const deadline = Math.min(timestamp + EXCHANGE_DEADLINE_SECONDS, pending.expires_at);
     let claimed: ClaimedRow | null;
@@ -629,18 +673,37 @@ export class OAuthTransactions {
     return { status: "complete" };
   }
 
+  async #expirePending(stateHash: string, timestamp: number): Promise<void> {
+    try {
+      await this.#dependencies.db
+        .prepare(
+          `UPDATE oauth_transactions SET status = 'expired',
+             provider_pkce_schema_version = NULL, provider_pkce_key_version = NULL,
+             provider_pkce_dek_iv = NULL, provider_pkce_wrapped_dek = NULL,
+             provider_pkce_payload_iv = NULL, provider_pkce_ciphertext = NULL
+           WHERE state_hash = ? AND status = 'pending' AND expires_at <= ?`,
+        )
+        .bind(stateHash, timestamp)
+        .run();
+    } catch {
+      // Nothing sensitive or actionable is exposed at the callback boundary.
+    }
+  }
+
   async #failPending(stateHash: string, timestamp: number): Promise<void> {
     try {
       await this.#dependencies.db
         .prepare(
-          `UPDATE oauth_transactions SET status = 'failed', failure_code = 'authorization_failed',
-             callback_completed_at = ?, provider_pkce_schema_version = NULL,
-             provider_pkce_key_version = NULL, provider_pkce_dek_iv = NULL,
-             provider_pkce_wrapped_dek = NULL, provider_pkce_payload_iv = NULL,
-             provider_pkce_ciphertext = NULL
+          `UPDATE oauth_transactions
+           SET status = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'failed' END,
+             failure_code = CASE WHEN expires_at <= ? THEN NULL ELSE 'authorization_failed' END,
+             callback_completed_at = CASE WHEN expires_at <= ? THEN NULL ELSE ? END,
+             provider_pkce_schema_version = NULL, provider_pkce_key_version = NULL,
+             provider_pkce_dek_iv = NULL, provider_pkce_wrapped_dek = NULL,
+             provider_pkce_payload_iv = NULL, provider_pkce_ciphertext = NULL
            WHERE state_hash = ? AND status = 'pending'`,
         )
-        .bind(timestamp, stateHash)
+        .bind(timestamp, timestamp, timestamp, timestamp, stateHash)
         .run();
     } catch {
       // Nothing sensitive or actionable is exposed at the callback boundary.
@@ -651,14 +714,17 @@ export class OAuthTransactions {
     transactionId: string,
     failureCode: "identity_mismatch" | "authorization_failed",
   ): Promise<void> {
-    const timestamp = now(this.#dependencies);
     try {
+      const timestamp = now(this.#dependencies);
       await this.#dependencies.db
         .prepare(
-          `UPDATE oauth_transactions SET status = 'failed', failure_code = ?, callback_completed_at = ?
+          `UPDATE oauth_transactions
+           SET status = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'failed' END,
+             failure_code = CASE WHEN expires_at <= ? THEN NULL ELSE ? END,
+             callback_completed_at = CASE WHEN expires_at <= ? THEN NULL ELSE ? END
            WHERE id = ? AND status = 'exchanging'`,
         )
-        .bind(failureCode, timestamp, transactionId)
+        .bind(timestamp, timestamp, failureCode, timestamp, timestamp, transactionId)
         .run();
     } catch {
       // A later status call terminalizes an abandoned exchange at its deadline.
@@ -715,7 +781,9 @@ export class OAuthTransactions {
                  WHERE identity_digest = ? AND deleted_at >= ?)
              ON CONFLICT(provider, issuer, subject) DO UPDATE SET
                email = excluded.email, display_name = excluded.display_name,
-               email_verified = excluded.email_verified, updated_at = excluded.updated_at`,
+               email_verified = excluded.email_verified,
+               updated_at = MAX(external_identities.updated_at, excluded.updated_at)
+             WHERE excluded.updated_at >= external_identities.updated_at`,
           )
           .bind(
             candidateIdentityId,
@@ -755,11 +823,13 @@ export class OAuthTransactions {
           ),
         this.#dependencies.db
           .prepare(
-            `UPDATE oauth_transactions SET status = 'failed',
-               failure_code = 'authorization_failed', callback_completed_at = ?
+            `UPDATE oauth_transactions
+             SET status = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'failed' END,
+               failure_code = CASE WHEN expires_at <= ? THEN NULL ELSE 'authorization_failed' END,
+               callback_completed_at = CASE WHEN expires_at <= ? THEN NULL ELSE ? END
              WHERE id = ? AND status = 'exchanging'`,
           )
-          .bind(completedAt, transaction.id),
+          .bind(completedAt, completedAt, completedAt, completedAt, transaction.id),
         this.#dependencies.db
           .prepare(
             `DELETE FROM principals WHERE id = ?
@@ -793,7 +863,7 @@ export class OAuthTransactions {
       throw new Error("invalid connect snapshot");
     }
     const refreshToken = result.tokenMaterial.refreshToken;
-    let committed = false;
+    let outcome: "committed" | "not_committed" | "unknown" = "not_committed";
     try {
       const fence = await this.#dependencies.identityDeletion.fenceDigest({
         provider: "google",
@@ -911,69 +981,189 @@ export class OAuthTransactions {
                 principalId,
                 transaction.expected_connection_generation,
               );
-      const results = await this.#dependencies.db.batch([
-        write,
-        this.#dependencies.db
-          .prepare(
-            `UPDATE oauth_transactions SET status = 'authorized', authorized_principal_id = ?,
-             authorized_identity_id = ?, authorized_connection_id = ?, callback_completed_at = ?
-           WHERE id = ? AND status = 'exchanging' AND intent = 'connect_calendar'
-             AND expires_at > ? AND authenticated_principal_id = ? AND expected_identity_id = ?
-             AND target_connection_id = ? AND target_connection_generation = ?
-             AND target_token_version = ?
-             AND EXISTS (SELECT 1 FROM connections WHERE id = ? AND principal_id = ?
-               AND identity_id = ? AND generation = ? AND token_version = ? AND status = 'active')
-             AND NOT EXISTS (SELECT 1 FROM identity_deletion_fences
-               WHERE identity_digest = ? AND deleted_at >= oauth_transactions.created_at)`,
-          )
-          .bind(
-            principalId,
-            identityId,
-            connectionId,
-            completedAt,
-            transaction.id,
-            completedAt,
-            principalId,
-            identityId,
-            connectionId,
-            generation,
-            tokenVersion,
-            connectionId,
-            principalId,
-            identityId,
-            generation,
-            tokenVersion,
-            fence,
-          ),
-        this.#dependencies.db
-          .prepare(
-            `UPDATE oauth_transactions SET status = 'failed', failure_code = 'authorization_failed',
-             callback_completed_at = ? WHERE id = ? AND status = 'exchanging'`,
-          )
-          .bind(completedAt, transaction.id),
-      ]);
-      if (results.length !== 3) throw new Error("connect finalization batch was incomplete");
-      const authorized = await this.#dependencies.db
-        .prepare(
-          `SELECT 1 FROM oauth_transactions AS transaction_record
-           JOIN connections AS connection_record
-             ON connection_record.id = transaction_record.authorized_connection_id
-            AND connection_record.principal_id = transaction_record.authorized_principal_id
-           WHERE transaction_record.id = ? AND transaction_record.status = 'authorized'
-             AND connection_record.id = ? AND connection_record.generation = ?
-             AND connection_record.token_version = ? AND connection_record.status = 'active'`,
-        )
-        .bind(transaction.id, connectionId, generation, tokenVersion)
-        .first();
-      committed = authorized !== null;
+      outcome = "unknown";
+      try {
+        const results = await this.#dependencies.db.batch([
+          write,
+          this.#dependencies.db
+            .prepare(
+              `UPDATE oauth_transactions SET status = 'authorized', authorized_principal_id = ?,
+               authorized_identity_id = ?, authorized_connection_id = ?, callback_completed_at = ?
+             WHERE id = ? AND status = 'exchanging' AND intent = 'connect_calendar'
+               AND expires_at > ? AND authenticated_principal_id = ? AND expected_identity_id = ?
+               AND target_connection_id = ? AND target_connection_generation = ?
+               AND target_token_version = ?
+               AND EXISTS (SELECT 1 FROM connections WHERE id = ? AND principal_id = ?
+                 AND identity_id = ? AND generation = ? AND token_version = ? AND status = 'active')
+               AND NOT EXISTS (SELECT 1 FROM identity_deletion_fences
+                 WHERE identity_digest = ? AND deleted_at >= oauth_transactions.created_at)`,
+            )
+            .bind(
+              principalId,
+              identityId,
+              connectionId,
+              completedAt,
+              transaction.id,
+              completedAt,
+              principalId,
+              identityId,
+              connectionId,
+              generation,
+              tokenVersion,
+              connectionId,
+              principalId,
+              identityId,
+              generation,
+              tokenVersion,
+              fence,
+            ),
+          this.#dependencies.db
+            .prepare(
+              `UPDATE oauth_transactions
+               SET status = CASE WHEN expires_at <= ? THEN 'expired' ELSE 'failed' END,
+                 failure_code = CASE WHEN expires_at <= ? THEN NULL ELSE 'authorization_failed' END,
+                 callback_completed_at = CASE WHEN expires_at <= ? THEN NULL ELSE ? END
+               WHERE id = ? AND status = 'exchanging'`,
+            )
+            .bind(completedAt, completedAt, completedAt, completedAt, transaction.id),
+        ]);
+        const changes = results.map((entry) => entry.meta.changes);
+        if (results.length === 3 && changes[0] === 1 && changes[1] === 1 && changes[2] === 0) {
+          outcome = "committed";
+        } else if (results.length === 3 && changes[0] === 0 && changes[1] === 0) {
+          outcome = "not_committed";
+        } else {
+          outcome = await this.#recoverConnectFinalization(transaction, envelope, fence);
+        }
+      } catch {
+        outcome = await this.#recoverConnectFinalization(transaction, envelope, fence);
+      }
     } finally {
-      if (!committed) {
+      if (outcome === "not_committed") {
         try {
           await this.#dependencies.google.revokeCalendarToken(refreshToken);
         } catch {
           /* best effort */
         }
       }
+      // Unknown D1 outcomes deliberately retain the provider grant: revoking could break an active,
+      // durably committed connection. The transaction contains no PKCE ciphertext after its claim.
+    }
+  }
+
+  async #recoverConnectFinalization(
+    transaction: ClaimedRow,
+    envelope: TokenEnvelopeRow,
+    fence: string,
+  ): Promise<"committed" | "not_committed" | "unknown"> {
+    const principalId = transaction.authenticated_principal_id;
+    const identityId = transaction.expected_identity_id;
+    const connectionId = transaction.target_connection_id;
+    const generation = transaction.target_connection_generation;
+    const tokenVersion = transaction.target_token_version;
+    if (
+      principalId === null ||
+      identityId === null ||
+      connectionId === null ||
+      generation === null ||
+      tokenVersion === null
+    ) {
+      return "unknown";
+    }
+    const exactConnectionSql = `id = ? AND principal_id = ? AND identity_id = ?
+      AND provider = 'google' AND status = 'active' AND generation = ? AND token_version = ?
+      AND envelope_schema_version = ? AND key_version = ? AND dek_iv = ? AND wrapped_dek = ?
+      AND payload_iv = ? AND ciphertext = ?`;
+    const exactBindings = [
+      connectionId,
+      principalId,
+      identityId,
+      generation,
+      tokenVersion,
+      envelope.envelope_schema_version,
+      envelope.key_version,
+      envelope.dek_iv,
+      envelope.wrapped_dek,
+      envelope.payload_iv,
+      envelope.ciphertext,
+    ];
+    try {
+      const row = await this.#dependencies.db
+        .prepare(
+          `SELECT status AS transaction_status, expires_at,
+             EXISTS (SELECT 1 FROM connections WHERE ${exactConnectionSql}) AS exact_connection
+           FROM oauth_transactions WHERE id = ? AND intent = 'connect_calendar'
+             AND authenticated_principal_id = ? AND expected_identity_id = ?
+             AND target_connection_id = ? AND target_connection_generation = ?
+             AND target_token_version = ? LIMIT 1`,
+        )
+        .bind(
+          ...exactBindings,
+          transaction.id,
+          principalId,
+          identityId,
+          connectionId,
+          generation,
+          tokenVersion,
+        )
+        .first<ConnectRecoveryRow>();
+      if (row === null) return "unknown";
+      if (row.transaction_status === "authorized" && row.exact_connection === 1) {
+        return "committed";
+      }
+      if (row.transaction_status === "exchanging" && row.exact_connection === 1) {
+        const recoveredAt = now(this.#dependencies);
+        if (recoveredAt < row.expires_at) {
+          const authorization = await this.#dependencies.db
+            .prepare(
+              `UPDATE oauth_transactions SET status = 'authorized', authorized_principal_id = ?,
+                 authorized_identity_id = ?, authorized_connection_id = ?, callback_completed_at = ?
+               WHERE id = ? AND status = 'exchanging' AND intent = 'connect_calendar'
+                 AND expires_at > ? AND authenticated_principal_id = ? AND expected_identity_id = ?
+                 AND target_connection_id = ? AND target_connection_generation = ?
+                 AND target_token_version = ?
+                 AND EXISTS (SELECT 1 FROM connections WHERE ${exactConnectionSql})
+                 AND NOT EXISTS (SELECT 1 FROM identity_deletion_fences
+                   WHERE identity_digest = ? AND deleted_at >= oauth_transactions.created_at)`,
+            )
+            .bind(
+              principalId,
+              identityId,
+              connectionId,
+              recoveredAt,
+              transaction.id,
+              recoveredAt,
+              principalId,
+              identityId,
+              connectionId,
+              generation,
+              tokenVersion,
+              ...exactBindings,
+              fence,
+            )
+            .run();
+          if (authorization.meta.changes === 1) return "committed";
+        }
+      }
+      if (row.exact_connection === 1) {
+        const removed = await this.#dependencies.db
+          .prepare(
+            `DELETE FROM connections WHERE ${exactConnectionSql}
+             AND NOT EXISTS (SELECT 1 FROM oauth_transactions
+               WHERE id = ? AND status IN ('authorized', 'consumed'))`,
+          )
+          .bind(...exactBindings, transaction.id)
+          .run();
+        if (removed.meta.changes !== 1) return "unknown";
+      }
+      if (row.transaction_status === "exchanging") {
+        await this.#failClaimed(transaction.id, "authorization_failed");
+      }
+      return row.transaction_status === "authorized" || row.transaction_status === "consumed"
+        ? "unknown"
+        : "not_committed";
+    } catch {
+      return "unknown";
     }
   }
 
@@ -988,13 +1178,18 @@ export class OAuthTransactions {
       tasknotesVerifier,
     );
     await this.#assertRedeemable(null, "sign_in", transactionId, pollingHash, challenge);
-    const session = await this.#dependencies.deviceSessions.redeemSignInTransaction({
-      transactionId,
-      expectedPollingDigest: pollingHash,
-      expectedTasknotesPkceChallenge: challenge,
-    });
-    if (session === null) return fail("conflict");
-    return { session: this.#sessionCredential(session) };
+    try {
+      const session = await this.#dependencies.deviceSessions.redeemSignInTransaction({
+        transactionId,
+        expectedPollingDigest: pollingHash,
+        expectedTasknotesPkceChallenge: challenge,
+      });
+      if (session === null) return fail("conflict");
+      return { session: this.#sessionCredential(session) };
+    } catch (error) {
+      if (error instanceof OAuthTransactionError) throw error;
+      return fail("internal");
+    }
   }
 
   public async redeemConnect(
@@ -1051,7 +1246,7 @@ export class OAuthTransactions {
     pollingSecret: string,
     verifier: string,
   ): Promise<{ pollingHash: string; challenge: string }> {
-    if (!/^[A-Za-z0-9_-]{43}$/u.test(pollingSecret) || !isValidPkceVerifier(verifier))
+    if (!isCanonicalSecret(pollingSecret, 32) || !isValidPkceVerifier(verifier))
       return fail("invalid_request");
     return {
       pollingHash: await digest(pollingSecret),

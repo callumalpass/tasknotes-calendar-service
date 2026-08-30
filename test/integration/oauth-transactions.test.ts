@@ -41,6 +41,27 @@ let identityDeletion: IdentityDeletion;
 let service: OAuthTransactions;
 let nextUuid: number;
 
+type BatchFault = "before" | "after";
+
+function databaseWithBatchFault(fault: BatchFault): D1Database {
+  let injected = false;
+  return new Proxy<D1Database>(testEnv.DB, {
+    get(target, property): unknown {
+      if (property === "batch") {
+        return async (statements: D1PreparedStatement[]) => {
+          if (injected) return target.batch(statements);
+          injected = true;
+          if (fault === "before") throw new Error("injected before batch");
+          await target.batch(statements);
+          throw new Error("injected after batch");
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? (value.bind(target) as unknown) : value;
+    },
+  });
+}
+
 function uuid(): string {
   nextUuid += 1;
   return `10000000-0000-4000-8000-${String(nextUuid).padStart(12, "0")}`;
@@ -134,21 +155,31 @@ beforeEach(async () => {
       scopes: ["openid", "email", "profile", CALENDAR_SCOPE],
     },
   };
-  const deviceSessions = new DeviceSessions({
-    db: testEnv.DB,
-    pepper: new Uint8Array(32).fill(31),
-    clock: { now: () => new Date(currentTime * 1000) },
-    random,
-  });
   identityDeletion = new IdentityDeletion({
     db: testEnv.DB,
     hmacKey: new Uint8Array(32).fill(41),
     nowEpochSeconds: () => currentTime,
   });
-  service = new OAuthTransactions({
-    db: testEnv.DB,
+  service = createService();
+});
+
+function createService(
+  db: D1Database = testEnv.DB,
+  options: { invalidRedirect?: boolean; throwingClock?: boolean } = {},
+): OAuthTransactions {
+  const deviceSessions = new DeviceSessions({
+    db,
+    pepper: new Uint8Array(32).fill(31),
+    clock: { now: () => new Date(currentTime * 1000) },
+    random,
+  });
+  return new OAuthTransactions({
+    db,
     environment: "local",
-    nowEpochSeconds: () => currentTime,
+    nowEpochSeconds: () => {
+      if (options.throwingClock) throw new Error("injected clock failure");
+      return currentTime;
+    },
     random,
     uuid,
     transactionKeyring: KEYS,
@@ -163,7 +194,9 @@ beforeEach(async () => {
       client: {
         clientId: "test-client",
         clientSecret: "test-secret",
-        redirectUri: "http://127.0.0.1:8787/oauth/google/callback",
+        redirectUri: options.invalidRedirect
+          ? "https://invalid.example.test/wrong"
+          : "http://127.0.0.1:8787/oauth/google/callback",
       },
       exchangeSignIn: () => {
         exchangeSignInCalls += 1;
@@ -180,7 +213,7 @@ beforeEach(async () => {
       },
     },
   });
-});
+}
 
 describe("OAuth transactions against migrated D1", () => {
   it("starts sign-in with exact identity scopes and persists only independent digests and ciphertext", async () => {
@@ -200,6 +233,9 @@ describe("OAuth transactions against migrated D1", () => {
     expect(row?.["state_hash"]).toHaveLength(43);
     expect(row?.["polling_secret_hash"]).toHaveLength(43);
     expect(row?.["nonce_hash"]).toHaveLength(43);
+    expect(
+      new Set([row?.["state_hash"], row?.["polling_secret_hash"], row?.["nonce_hash"]]).size,
+    ).toBe(3);
     expect(row?.["provider_pkce_ciphertext"]).toEqual(expect.any(String));
     expect(serialized).not.toContain(started.polling_secret);
     expect(serialized).not.toContain(state(started));
@@ -215,6 +251,33 @@ describe("OAuth transactions against migrated D1", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid_request" });
     await expect(startConnect()).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("validates the authorization URL before persisting transaction authority", async () => {
+    service = createService(testEnv.DB, { invalidRedirect: true });
+    await expect(startSignIn()).rejects.toMatchObject({ code: "internal" });
+    await expect(
+      testEnv.DB.prepare("SELECT COUNT(*) AS count FROM oauth_transactions").first("count"),
+    ).resolves.toBe(0);
+  });
+
+  it("rejects noncanonical capability aliases and uppercase UUID aliases", async () => {
+    const started = await startSignIn();
+    const transactionAlias = `${started.transaction_id.slice(0, -1)}B`;
+    const pollingAlias = `${started.polling_secret.slice(0, -1)}B`;
+    await expect(
+      service.statusSignIn(transactionAlias, started.polling_secret),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(service.statusSignIn(started.transaction_id, pollingAlias)).rejects.toMatchObject({
+      code: "invalid_request",
+    });
+    await expect(
+      service.startConnect("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".toUpperCase(), {
+        client_kind: "web",
+        device_name: "Test browser",
+        code_challenge: await challenge(),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
   });
 
   it("creates a sign-in identity, updates metadata by immutable tuple, and redeems once", async () => {
@@ -238,6 +301,9 @@ describe("OAuth transactions against migrated D1", () => {
     await expect(
       service.redeemSignIn(started.transaction_id, started.polling_secret, VERIFIER),
     ).rejects.toMatchObject({ code: "conflict" });
+    expect(
+      JSON.stringify(await testEnv.DB.prepare("SELECT * FROM oauth_transactions").all()),
+    ).not.toContain("provider-code-value");
     const identity = await testEnv.DB.prepare(
       "SELECT subject, email, display_name FROM external_identities",
     ).first();
@@ -246,6 +312,44 @@ describe("OAuth transactions against migrated D1", () => {
       email: "new@example.test",
       display_name: "New name",
     });
+  });
+
+  it("keeps identity metadata timestamps monotonic and rejects control text", async () => {
+    const newerTimestamp = NOW + 100;
+    await testEnv.DB.prepare(
+      `INSERT INTO principals (id, created_at, last_active_at) VALUES (?, ?, ?)`,
+    )
+      .bind(PRINCIPAL, NOW, NOW)
+      .run();
+    await testEnv.DB.prepare(
+      `INSERT INTO external_identities
+       (id, principal_id, provider, issuer, subject, email, display_name,
+        email_verified, created_at, updated_at)
+       VALUES (?, ?, 'google', 'https://accounts.google.com', 'subject-a',
+               'newer@example.test', 'Newer', 1, ?, ?)`,
+    )
+      .bind(IDENTITY, PRINCIPAL, NOW, newerTimestamp)
+      .run();
+    const started = await startSignIn();
+    await service.callback({ code: "provider-code-value", state: state(started) });
+    await expect(
+      testEnv.DB.prepare(
+        "SELECT email, display_name, updated_at FROM external_identities WHERE id = ?",
+      )
+        .bind(IDENTITY)
+        .first(),
+    ).resolves.toEqual({
+      email: "newer@example.test",
+      display_name: "Newer",
+      updated_at: newerTimestamp,
+    });
+
+    const controlled = await startSignIn();
+    signInResult = { ...signInResult, name: "unsafe\nname" };
+    await service.callback({ code: "provider-code-value", state: state(controlled) });
+    await expect(
+      service.statusSignIn(controlled.transaction_id, controlled.polling_secret),
+    ).resolves.toEqual({ status: "failed", failure_code: "authorization_failed" });
   });
 
   it("converges 25 concurrent same-sub sign-in finalizations on one principal", async () => {
@@ -296,6 +400,21 @@ describe("OAuth transactions against migrated D1", () => {
         "SELECT display_name FROM external_identities WHERE subject = 'subject-a'",
       ).first("display_name"),
     ).resolves.toBe("Updated existing");
+  });
+
+  it("rejects the wrong TaskNotes verifier without consuming sign-in authority", async () => {
+    const started = await startSignIn();
+    await service.callback({ code: "provider-code-value", state: state(started) });
+    await expect(
+      service.redeemSignIn(
+        started.transaction_id,
+        started.polling_secret,
+        "wrong-tasknotes-verifier-value-that-is-long-enough-123",
+      ),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(
+      service.redeemSignIn(started.transaction_id, started.polling_secret, VERIFIER),
+    ).resolves.toHaveProperty("session.credential");
   });
 
   it("gives exactly one winner across 25 sign-in redemption attempts", async () => {
@@ -357,10 +476,22 @@ describe("OAuth transactions against migrated D1", () => {
 
     const expired = await startSignIn();
     currentTime += 600;
+    await service.callback({ error: "access_denied", state: state(expired) });
     await expect(
       service.statusSignIn(expired.transaction_id, expired.polling_secret),
     ).resolves.toEqual({
       status: "expired",
+    });
+    const expiredRow = await testEnv.DB.prepare(
+      `SELECT provider_pkce_ciphertext, failure_code, callback_completed_at
+       FROM oauth_transactions WHERE id = ?`,
+    )
+      .bind(expired.transaction_id)
+      .first();
+    expect(expiredRow).toEqual({
+      provider_pkce_ciphertext: null,
+      failure_code: null,
+      callback_completed_at: null,
     });
     await expect(
       service.statusSignIn(expired.transaction_id, "A".repeat(43)),
@@ -369,13 +500,15 @@ describe("OAuth transactions against migrated D1", () => {
     });
   });
 
-  it("fails a tampered provider PKCE envelope without exchanging", async () => {
+  it("fails a tampered provider PKCE envelope without exchanging but lets expiry win", async () => {
     const started = await startSignIn();
+    const expired = await startSignIn();
     await testEnv.DB.prepare("DROP TRIGGER oauth_transactions_immutable_binding").run();
     await testEnv.DB.prepare(
-      "UPDATE oauth_transactions SET provider_pkce_ciphertext = 'tampered' WHERE id = ?",
+      `UPDATE oauth_transactions SET provider_pkce_ciphertext = 'tampered'
+       WHERE id IN (?, ?)`,
     )
-      .bind(started.transaction_id)
+      .bind(started.transaction_id, expired.transaction_id)
       .run();
     await service.callback({ code: "provider-code-value", state: state(started) });
     expect(exchangeSignInCalls).toBe(0);
@@ -384,6 +517,27 @@ describe("OAuth transactions against migrated D1", () => {
     ).resolves.toEqual({
       status: "failed",
       failure_code: "authorization_failed",
+    });
+
+    currentTime += 600;
+    await service.callback({ code: "provider-code-value", state: state(expired) });
+    await expect(
+      service.statusSignIn(expired.transaction_id, expired.polling_secret),
+    ).resolves.toEqual({ status: "expired" });
+    await expect(
+      testEnv.DB.prepare("SELECT provider_pkce_ciphertext FROM oauth_transactions WHERE id = ?")
+        .bind(expired.transaction_id)
+        .first("provider_pkce_ciphertext"),
+    ).resolves.toBeNull();
+  });
+
+  it("expires an equal-time code callback without exchanging", async () => {
+    const code = await startSignIn();
+    currentTime += 600;
+    await service.callback({ code: "provider-code-value", state: state(code) });
+    expect(exchangeSignInCalls).toBe(0);
+    await expect(service.statusSignIn(code.transaction_id, code.polling_secret)).resolves.toEqual({
+      status: "expired",
     });
   });
 
@@ -442,6 +596,49 @@ describe("OAuth transactions against migrated D1", () => {
     expect(redemptions.filter((attempt) => attempt.status === "rejected")).toHaveLength(24);
   });
 
+  it("removes an unredeemed active connection when its authorized transaction expires", async () => {
+    await insertPrincipal();
+    const started = await startConnect();
+    await service.callback({ code: "calendar-provider-code", state: state(started) });
+    currentTime += 600;
+    await expect(
+      service.statusConnect(PRINCIPAL, started.transaction_id, started.polling_secret),
+    ).resolves.toEqual({ status: "expired" });
+    await expect(
+      testEnv.DB.prepare("SELECT COUNT(*) AS count FROM connections").first("count"),
+    ).resolves.toBe(0);
+    await expect(
+      testEnv.DB.prepare("SELECT google_connection_generation FROM principals WHERE id = ?")
+        .bind(PRINCIPAL)
+        .first("google_connection_generation"),
+    ).resolves.toBe(2);
+  });
+
+  it("recovers connect finalization after ambiguous before- and after-commit batch faults", async () => {
+    await insertPrincipal();
+    const before = await startConnect();
+    service = createService(databaseWithBatchFault("before"));
+    await service.callback({ code: "calendar-provider-code", state: state(before) });
+    expect(exchangeCalendarCalls).toBe(1);
+    expect(revoked).toEqual(["refresh-token-private"]);
+    await expect(
+      service.statusConnect(PRINCIPAL, before.transaction_id, before.polling_secret),
+    ).resolves.toEqual({ status: "failed", failure_code: "authorization_failed" });
+
+    const after = await startConnect();
+    revoked = [];
+    exchangeCalendarCalls = 0;
+    service = createService(databaseWithBatchFault("after"));
+    await service.callback({ code: "calendar-provider-code", state: state(after) });
+    expect(exchangeCalendarCalls).toBe(1);
+    expect(revoked).toEqual([]);
+    await expect(
+      service.statusConnect(PRINCIPAL, after.transaction_id, after.polling_secret),
+    ).resolves.toMatchObject({ status: "authorized" });
+    await service.callback({ code: "replayed-provider-code", state: state(after) });
+    expect(exchangeCalendarCalls).toBe(1);
+  });
+
   it("replaces reconnect_required in place and advances generation and token version exactly once", async () => {
     await insertPrincipal(true);
     const started = await startConnect();
@@ -486,6 +683,49 @@ describe("OAuth transactions against migrated D1", () => {
     ).resolves.toBe(0);
   });
 
+  it("makes equal deletion fences and replacement-generation changes defeat connect commit", async () => {
+    await insertPrincipal();
+    const fenced = await startConnect();
+    onCalendarExchange = async () => {
+      const fence = await identityDeletion.fenceDigest({
+        provider: "google",
+        issuer: "https://accounts.google.com",
+        subject: "subject-a",
+      });
+      await testEnv.DB.prepare(
+        "INSERT INTO identity_deletion_fences (identity_digest, deleted_at) VALUES (?, ?)",
+      )
+        .bind(fence, NOW)
+        .run();
+    };
+    await service.callback({ code: "calendar-provider-code", state: state(fenced) });
+    expect(revoked).toEqual(["refresh-token-private"]);
+    await expect(
+      testEnv.DB.prepare("SELECT COUNT(*) AS count FROM connections").first("count"),
+    ).resolves.toBe(0);
+
+    await testEnv.DB.prepare("DELETE FROM identity_deletion_fences").run();
+    const replacement = await startConnect();
+    revoked = [];
+    onCalendarExchange = async () => {
+      await testEnv.DB.prepare(
+        `INSERT INTO connections
+         (id, principal_id, identity_id, provider, status, generation,
+          envelope_schema_version, key_version, dek_iv, wrapped_dek, payload_iv,
+          ciphertext, token_version, created_at, updated_at)
+         VALUES ('20000000-0000-4000-8000-000000000099', ?, ?, 'google', 'active', 1,
+                 1, 1, 'other-dek', 'other-wrapped', 'other-iv', 'other-ciphertext', 1, ?, ?)`,
+      )
+        .bind(PRINCIPAL, IDENTITY, NOW, NOW)
+        .run();
+    };
+    await service.callback({ code: "calendar-provider-code", state: state(replacement) });
+    expect(revoked).toEqual(["refresh-token-private"]);
+    await expect(testEnv.DB.prepare("SELECT id FROM connections").first("id")).resolves.toBe(
+      "20000000-0000-4000-8000-000000000099",
+    );
+  });
+
   it("maps malformed injected claims and provider failures to privacy-safe terminal failures", async () => {
     const malformed = await startSignIn();
     signInResult = {
@@ -508,6 +748,16 @@ describe("OAuth transactions against migrated D1", () => {
       JSON.stringify(await testEnv.DB.prepare("SELECT * FROM oauth_transactions").all()),
     ).not.toContain("provider-code-value");
     expect(thrown.transaction_id).toHaveLength(43);
+  });
+
+  it("keeps callback completion quiet when validation and the clock fail", async () => {
+    service = createService(testEnv.DB, { throwingClock: true });
+    await expect(
+      service.callback({ code: "provider-code-value", state: "A".repeat(43) }),
+    ).resolves.toEqual({ status: "complete" });
+    await expect(service.callback({ code: "short", state: "not-base64url" })).resolves.toEqual({
+      status: "complete",
+    });
   });
 
   it("uses generic errors that never include supplied capabilities", async () => {

@@ -132,7 +132,7 @@ describe("public contract schemas", () => {
   });
 
   it("accepts exactly a provider success or bounded provider error callback", () => {
-    const state = "s".repeat(43);
+    const state = "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8";
     expect(
       ProviderCallbackQuerySchema.safeParse({
         code: "c".repeat(32),

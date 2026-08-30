@@ -11,9 +11,9 @@ import {
 } from "../../src/http/router";
 
 const id = "550e8400-e29b-41d4-a716-446655440000";
-const transactionId = "t".repeat(43);
+const transactionId = "EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8";
 const deviceId = "AAECAwQFBgcICQoLDA0ODw";
-const pollingSecret = "p".repeat(43);
+const pollingSecret = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
 const credential = "v1.AAECAwQFBgcICQoLDA0ODw.EBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8";
 const instant = "2026-08-30T12:00:00Z";
 
@@ -417,7 +417,7 @@ describe("contract router", () => {
         "providerCallback",
         () =>
           new Request(
-            `https://calendar.test/oauth/google/callback?code=${"c".repeat(16)}&state=${"s".repeat(43)}`,
+            `https://calendar.test/oauth/google/callback?code=${"c".repeat(16)}&state=${transactionId}`,
           ),
       ],
     ];

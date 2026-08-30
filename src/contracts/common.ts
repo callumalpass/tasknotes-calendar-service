@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { DEVICE_CLIENT_KINDS, isValidDeviceName } from "../domain/device";
+import { decodeBase64Url } from "../crypto/base64url";
 import { isServiceCredential } from "../domain/service-credential";
 
 export const CLIENT_KINDS = DEVICE_CLIENT_KINDS;
@@ -9,12 +10,23 @@ export const MAX_CURSOR_LENGTH = 2048;
 export const MAX_OPAQUE_SECRET_LENGTH = 1024;
 export const MAX_RANGE_DAYS = 93;
 
-export const UuidSchema = z.uuid();
-export const TransactionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
-export const DeviceSessionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
-export const PollingSecretSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+function canonicalBase64Url(bytes: number): (value: string) => boolean {
+  return (value) => {
+    try {
+      decodeBase64Url(value, { minBytes: bytes, maxBytes: bytes });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
+
+export const UuidSchema = z.uuid().refine((value) => value === value.toLowerCase());
+export const TransactionIdSchema = z.string().refine(canonicalBase64Url(32));
+export const DeviceSessionIdSchema = z.string().refine(canonicalBase64Url(16));
+export const PollingSecretSchema = z.string().refine(canonicalBase64Url(32));
 export const ServiceCredentialSchema = z.string().refine(isServiceCredential);
-export const OAuthStateSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const OAuthStateSchema = z.string().refine(canonicalBase64Url(32));
 export const OpaqueSecretSchema = z
   .string()
   .regex(/^[\u0021-\u007e]+$/)
