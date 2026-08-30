@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CalendarSchema,
   EventSchema,
   EventsQuerySchema,
   ProviderCallbackQuerySchema,
@@ -83,6 +84,26 @@ describe("public contract schemas", () => {
     expect(EventsQuerySchema.safeParse({ ...range, cursor: "short" }).success).toBe(false);
     expect(EventsQuerySchema.safeParse({ ...range, cursor: "c".repeat(2049) }).success).toBe(false);
     expect(EventsQuerySchema.safeParse({ ...range, calendar_id: id }).success).toBe(false);
+  });
+
+  it("counts calendar metadata limits in Unicode code points", () => {
+    const calendar = {
+      id,
+      connection_id: id,
+      name: "😀".repeat(500),
+      description: "😀".repeat(4000),
+      color: null,
+      time_zone: "Europe/London",
+      is_primary: true,
+    };
+    expect(CalendarSchema.safeParse(calendar).success).toBe(true);
+    expect(CalendarSchema.safeParse({ ...calendar, name: "😀".repeat(501) }).success).toBe(false);
+    expect(CalendarSchema.safeParse({ ...calendar, description: "😀".repeat(4001) }).success).toBe(
+      false,
+    );
+    expect(CalendarSchema.safeParse({ ...calendar, time_zone: "😀".repeat(101) }).success).toBe(
+      false,
+    );
   });
 
   it("enforces strict scheduled variants, ordered matching boundaries, and recurrence", () => {

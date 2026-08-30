@@ -1,6 +1,9 @@
 export type ProviderErrorCode =
   | "invalid_request"
+  | "reauthorization_required"
   | "unauthorized"
+  | "permission_denied"
+  | "not_found"
   | "rate_limited"
   | "unavailable"
   | "timeout"

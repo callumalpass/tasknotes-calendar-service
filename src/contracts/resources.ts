@@ -33,13 +33,21 @@ export const ConnectionsResponseSchema = z.strictObject({
   connections: z.array(ConnectionSchema).max(1),
 });
 
+function boundedCodePointText(maximumCharacters: number, allowEmpty = true) {
+  const schema = z
+    .string()
+    .max(maximumCharacters * 2)
+    .refine((value) => Array.from(value).length <= maximumCharacters);
+  return allowEmpty ? schema : schema.refine((value) => value.length > 0);
+}
+
 export const CalendarSchema = z.strictObject({
   id: UuidSchema,
   connection_id: UuidSchema,
-  name: z.string().min(1).max(500),
-  description: z.string().max(4000).nullable(),
-  color: z.string().max(32).nullable(),
-  time_zone: z.string().min(1).max(100).nullable(),
+  name: boundedCodePointText(500, false),
+  description: boundedCodePointText(4000).nullable(),
+  color: boundedCodePointText(32).nullable(),
+  time_zone: boundedCodePointText(100, false).nullable(),
   is_primary: z.boolean(),
 });
 

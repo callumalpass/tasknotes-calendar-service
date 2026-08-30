@@ -146,7 +146,7 @@ describe("Google provider HTTP boundary", () => {
     );
   });
 
-  it("maps invalid_grant refresh failures to generic unauthorized without leaking descriptions", async () => {
+  it("maps invalid_grant refresh failures to reauthorization without leaking descriptions", async () => {
     const result = await refreshGoogleToken({
       configuration: testConfiguration,
       fetch: fakeFetch(() =>
@@ -165,7 +165,10 @@ describe("Google provider HTTP boundary", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: { code: "unauthorized", message: "Provider authorization failed." },
+      error: {
+        code: "reauthorization_required",
+        message: "Provider reauthorization is required.",
+      },
     });
     expect(JSON.stringify(result)).not.toContain("refresh-secret");
     expect(JSON.stringify(result)).not.toContain("private@example.test");
@@ -250,6 +253,42 @@ describe("Google provider HTTP boundary", () => {
         nextPageToken: "next+/=?& token",
       },
     });
+  });
+
+  it.each([
+    ["summary", ""],
+    ["summary", "😀".repeat(501)],
+    ["description", "😀".repeat(4001)],
+    ["timeZone", "x".repeat(101)],
+  ] as const)("rejects hostile calendar %s metadata", async (field, value) => {
+    const result = await listGoogleCalendarsPage({
+      configuration: testConfiguration,
+      accessToken: "access",
+      fetch: fakeFetch(() => json({ items: [{ ...calendar, [field]: value }] })),
+    });
+
+    expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+  });
+
+  it("accepts calendar metadata at the public code-point boundaries", async () => {
+    const result = await listGoogleCalendarsPage({
+      configuration: testConfiguration,
+      accessToken: "access",
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            {
+              ...calendar,
+              summary: "😀".repeat(500),
+              description: "😀".repeat(4000),
+              timeZone: "America/Argentina/ComodRivadavia",
+            },
+          ],
+        }),
+      ),
+    });
+
+    expect(result).toMatchObject({ ok: true });
   });
 
   it("builds an events URL locally and excludes provider-private fields", async () => {
@@ -525,6 +564,39 @@ describe("Google provider HTTP boundary", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("enforces printable provider page tokens at the 1024-byte boundary", async () => {
+    const accepted = "x".repeat(1024);
+    const input = await listGoogleCalendarsPage({
+      configuration: testConfiguration,
+      accessToken: "access",
+      pageToken: accepted,
+      fetch: fakeFetch((url) => {
+        expect(url.searchParams.get("pageToken")).toBe(accepted);
+        return json({ items: [], nextPageToken: `${"x".repeat(1023)}y` });
+      }),
+    });
+    expect(input).toMatchObject({ ok: true });
+
+    for (const nextPageToken of ["x".repeat(1025), "line\nbreak", "tab\ttoken"]) {
+      const result = await listGoogleCalendarsPage({
+        configuration: testConfiguration,
+        accessToken: "access",
+        fetch: fakeFetch(() => json({ items: [], nextPageToken })),
+      });
+      expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    }
+
+    const fetcher = vi.fn<typeof fetch>();
+    const oversizedInput = await listGoogleCalendarsPage({
+      configuration: testConfiguration,
+      accessToken: "access",
+      pageToken: "x".repeat(1025),
+      fetch: fetcher,
+    });
+    expect(oversizedInput).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("rejects repeated and oversized page tokens and too many or huge items", async () => {
     const repeated = await listGoogleCalendarsPage({
       configuration: testConfiguration,
@@ -542,7 +614,7 @@ describe("Google provider HTTP boundary", () => {
         throw new Error("must not fetch");
       }),
     });
-    expect(oversizedInput).toMatchObject({ ok: false, error: { code: "invalid_request" } });
+    expect(oversizedInput).toMatchObject({ ok: false, error: { code: "invalid_response" } });
 
     const tooMany = await listGoogleCalendarsPage({
       configuration: testConfiguration,
@@ -575,6 +647,23 @@ describe("Google provider HTTP boundary", () => {
     expect(result).toMatchObject({ ok: false, error: { code } });
   });
 
+  it.each([
+    [401, "unauthorized", "Provider authorization failed."],
+    [404, "not_found", "Provider resource was not found."],
+  ] as const)(
+    "classifies Calendar HTTP %i without provider detail",
+    async (status, code, message) => {
+      const result = await listGoogleCalendarsPage({
+        configuration: testConfiguration,
+        accessToken: "access-secret",
+        fetch: fakeFetch(() => json({ private: "access-secret provider detail" }, status)),
+      });
+
+      expect(result).toEqual({ ok: false, error: { code, message } });
+      expect(JSON.stringify(result)).not.toContain("access-secret");
+    },
+  );
+
   it.each(["userRateLimitExceeded", "rateLimitExceeded", "quotaExceeded", "dailyLimitExceeded"])(
     "maps Calendar 403 %s usage errors to bounded rate limits",
     async (reason) => {
@@ -605,7 +694,7 @@ describe("Google provider HTTP boundary", () => {
     },
   );
 
-  it("keeps non-usage and oversized Calendar 403 errors unauthorized", async () => {
+  it("keeps non-usage and oversized Calendar 403 errors permission denied", async () => {
     for (const body of [
       { error: { errors: [{ reason: "forbidden", message: "private detail" }] } },
       {
@@ -619,7 +708,7 @@ describe("Google provider HTTP boundary", () => {
       });
       expect(result).toEqual({
         ok: false,
-        error: { code: "unauthorized", message: "Provider authorization failed." },
+        error: { code: "permission_denied", message: "Provider permission was denied." },
       });
     }
   });

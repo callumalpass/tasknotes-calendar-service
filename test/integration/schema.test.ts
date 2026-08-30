@@ -36,16 +36,78 @@ async function connection(
   principalId = "principal-a",
   identityId = "identity-a",
   generation = 1,
+  discoveryOwner: string | null = null,
 ): Promise<void> {
   await testEnv.DB.prepare(
     `INSERT INTO connections
        (id, principal_id, identity_id, provider, status, generation,
         envelope_schema_version, key_version, dek_iv, wrapped_dek, payload_iv, ciphertext,
-        token_version, created_at, updated_at)
+        token_version, discovery_lease_owner, discovery_lease_until,
+        discovery_lease_generation, discovery_lease_token_version, created_at, updated_at)
      VALUES (?, ?, ?, 'google', 'active', ?, 1, 1, 'dek-1', 'wrapped-1', 'payload-1',
-             'ciphertext-1', 1, ?, ?)`,
+             'ciphertext-1', 1, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(id, principalId, identityId, generation, NOW, NOW)
+    .bind(
+      id,
+      principalId,
+      identityId,
+      generation,
+      discoveryOwner,
+      discoveryOwner === null ? null : NOW + 30,
+      discoveryOwner === null ? null : generation,
+      discoveryOwner === null ? null : 1,
+      NOW,
+      NOW,
+    )
+    .run();
+}
+
+async function calendarResource(
+  id = "calendar-a",
+  principalId = "principal-a",
+  connectionId = "connection-a",
+  providerId = "provider-calendar-a",
+  name = "Work",
+): Promise<void> {
+  await testEnv.DB.prepare(
+    `INSERT INTO calendars
+       (id, principal_id, connection_id, provider_calendar_id, name, description, color,
+        time_zone, access_role, is_primary, discovered_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'Description', '#ffffff', 'Europe/London', 'owner', 1, ?, ?)`,
+  )
+    .bind(id, principalId, connectionId, providerId, name, NOW, NOW)
+    .run();
+}
+
+async function acquireRefreshLease(
+  owner: string,
+  updatedAt = NOW + 1,
+  until = updatedAt + 30,
+): Promise<void> {
+  await testEnv.DB.prepare(
+    `UPDATE connections
+     SET refresh_lease_owner = ?, refresh_lease_until = ?,
+         refresh_lease_generation = generation, refresh_lease_token_version = token_version,
+         updated_at = ?
+     WHERE id = 'connection-a'`,
+  )
+    .bind(owner, until, updatedAt)
+    .run();
+}
+
+async function acquireDiscoveryLease(
+  owner: string,
+  updatedAt = NOW + 1,
+  until = updatedAt + 30,
+): Promise<void> {
+  await testEnv.DB.prepare(
+    `UPDATE connections
+     SET discovery_lease_owner = ?, discovery_lease_until = ?,
+         discovery_lease_generation = generation, discovery_lease_token_version = token_version,
+         updated_at = ?
+     WHERE id = 'connection-a'`,
+  )
+    .bind(owner, until, updatedAt)
     .run();
 }
 
@@ -178,6 +240,9 @@ describe("initial D1 schema invariants", () => {
   it("advances the principal epoch on insert and delete and rejects stale insertion", async () => {
     await principal();
     await identity();
+    await expect(
+      connection("leased-insert", "principal-a", "identity-a", 1, "forbidden"),
+    ).rejects.toThrow("invalid connection insertion authority");
     await connection();
     expect(await epoch()).toBe(1);
     await expect(connection("stale", "principal-a", "identity-a", 1)).rejects.toThrow(
@@ -190,32 +255,58 @@ describe("initial D1 schema invariants", () => {
     expect(await epoch()).toBe(3);
   });
 
-  it("accepts same-value ownership and coherent lease metadata without token mutation", async () => {
+  it("enforces complete, bounded refresh leases and acquire/steal/release concurrency", async () => {
     await principal();
     await identity();
     await connection();
+
+    for (const sql of [
+      "UPDATE connections SET refresh_lease_owner = 'partial' WHERE id = 'connection-a'",
+      "UPDATE connections SET discovery_lease_owner = 'partial' WHERE id = 'connection-a'",
+      `UPDATE connections SET refresh_lease_owner = '${"x".repeat(257)}',
+       refresh_lease_until = ${NOW + 30}, refresh_lease_generation = generation,
+       refresh_lease_token_version = token_version WHERE id = 'connection-a'`,
+      `UPDATE connections SET discovery_lease_owner = 'wrong-version',
+       discovery_lease_until = ${NOW + 30}, discovery_lease_generation = generation,
+       discovery_lease_token_version = token_version + 1 WHERE id = 'connection-a'`,
+    ]) {
+      await expect(testEnv.DB.prepare(sql).run()).rejects.toThrow();
+    }
+    await expect(acquireRefreshLease("worker-a", NOW + 1, NOW + 62)).rejects.toThrow(
+      "invalid connection authority transition",
+    );
+    await acquireRefreshLease("worker-a", NOW + 1, NOW + 31);
+    await expect(acquireRefreshLease("worker-b", NOW + 2, NOW + 32)).rejects.toThrow(
+      "invalid connection authority transition",
+    );
+
+    const nonOwner = await testEnv.DB.prepare(
+      `UPDATE connections SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
+       refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
+       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-b'
+       AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
+    )
+      .bind(NOW + 2)
+      .run();
+    expect(nonOwner.meta.changes).toBe(0);
+
+    await acquireRefreshLease("worker-b", NOW + 31, NOW + 61);
     await expect(
       testEnv.DB.prepare(
-        `UPDATE connections
-         SET id = id, principal_id = principal_id, identity_id = identity_id, provider = provider,
-             refresh_lease_owner = 'worker', refresh_lease_until = ?,
-             refresh_lease_generation = generation, refresh_lease_token_version = token_version,
-             updated_at = ?
-         WHERE id = 'connection-a'`,
+        `UPDATE connections SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
+         refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
+         WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-b'
+         AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
       )
-        .bind(NOW + 30, NOW + 1)
+        .bind(NOW + 32)
         .run(),
     ).resolves.toMatchObject({ meta: { changes: 1 } });
+
     await expect(
       testEnv.DB.prepare(
         "UPDATE connections SET principal_id = 'other' WHERE id = 'connection-a'",
       ).run(),
     ).rejects.toThrow("connection ownership is immutable");
-    await expect(
-      testEnv.DB.prepare(
-        "UPDATE connections SET refresh_lease_generation = 2 WHERE id = 'connection-a'",
-      ).run(),
-    ).rejects.toThrow();
   });
 
   it("rejects arbitrary jumps and envelope replacement without the exact version transition", async () => {
@@ -236,25 +327,45 @@ describe("initial D1 schema invariants", () => {
     }
   });
 
-  it("permits exact refresh and KEK rewrap transitions", async () => {
+  it("requires exact refresh ownership, rejects a stale owner, and permits expired commit and rewrap", async () => {
     await principal();
     await identity();
     await connection();
+    await acquireRefreshLease("worker-a", NOW + 1, NOW + 31);
+    await acquireRefreshLease("worker-b", NOW + 31, NOW + 61);
+
+    const stale = await testEnv.DB.prepare(
+      `UPDATE connections
+       SET token_version = token_version + 1, key_version = 2,
+           dek_iv = 'dek-2', wrapped_dek = 'wrapped-2', payload_iv = 'payload-2',
+           ciphertext = 'ciphertext-2', refresh_lease_owner = NULL, refresh_lease_until = NULL,
+           refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
+       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-a'
+       AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
+    )
+      .bind(NOW + 100)
+      .run();
+    expect(stale.meta.changes).toBe(0);
+
     await testEnv.DB.prepare(
       `UPDATE connections
-       SET token_version = 2, key_version = 2, dek_iv = 'dek-2', wrapped_dek = 'wrapped-2',
-           payload_iv = 'payload-2', ciphertext = 'ciphertext-2', updated_at = ?
-       WHERE id = 'connection-a'`,
+       SET token_version = token_version + 1, key_version = 2,
+           dek_iv = 'dek-2', wrapped_dek = 'wrapped-2', payload_iv = 'payload-2',
+           ciphertext = 'ciphertext-2', refresh_lease_owner = NULL, refresh_lease_until = NULL,
+           refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
+       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-b'
+       AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
     )
-      .bind(NOW + 1)
+      .bind(NOW + 100)
       .run();
     expect(await epoch()).toBe(1);
+
     await testEnv.DB.prepare(
       `UPDATE connections
        SET key_version = 3, dek_iv = 'dek-3', wrapped_dek = 'wrapped-3', updated_at = ?
        WHERE id = 'connection-a'`,
     )
-      .bind(NOW + 2)
+      .bind(NOW + 101)
       .run();
     await expect(
       testEnv.DB.prepare(
@@ -267,6 +378,109 @@ describe("initial D1 schema invariants", () => {
       payload_iv: "payload-2",
       ciphertext: "ciphertext-2",
     });
+  });
+
+  it("serializes discovery leases and lets refresh commit clear concurrent discovery authority", async () => {
+    await principal();
+    await identity();
+    await connection();
+    await acquireRefreshLease("refresh-worker", NOW + 1, NOW + 31);
+    await acquireDiscoveryLease("discovery-a", NOW + 2, NOW + 32);
+
+    await expect(acquireDiscoveryLease("discovery-b", NOW + 3, NOW + 33)).rejects.toThrow(
+      "invalid connection authority transition",
+    );
+    const nonOwner = await testEnv.DB.prepare(
+      `UPDATE connections SET discovery_lease_owner = NULL, discovery_lease_until = NULL,
+       discovery_lease_generation = NULL, discovery_lease_token_version = NULL, updated_at = ?
+       WHERE id = 'connection-a' AND discovery_lease_owner = 'discovery-b'`,
+    )
+      .bind(NOW + 3)
+      .run();
+    expect(nonOwner.meta.changes).toBe(0);
+
+    await acquireDiscoveryLease("discovery-b", NOW + 32, NOW + 62);
+    await testEnv.DB.prepare(
+      `UPDATE connections SET discovery_lease_owner = NULL, discovery_lease_until = NULL,
+       discovery_lease_generation = NULL, discovery_lease_token_version = NULL, updated_at = ?
+       WHERE id = 'connection-a' AND discovery_lease_owner = 'discovery-b'
+       AND discovery_lease_generation = generation
+       AND discovery_lease_token_version = token_version`,
+    )
+      .bind(NOW + 33)
+      .run();
+    await acquireDiscoveryLease("discovery-a", NOW + 34, NOW + 64);
+
+    await expect(
+      testEnv.DB.prepare(
+        `UPDATE connections
+         SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
+             refresh_lease_generation = NULL, refresh_lease_token_version = NULL,
+             discovery_lease_owner = 'swapped', discovery_lease_until = ?,
+             discovery_lease_generation = generation,
+             discovery_lease_token_version = token_version, updated_at = ?
+         WHERE id = 'connection-a'`,
+      )
+        .bind(NOW + 60, NOW + 35)
+        .run(),
+    ).rejects.toThrow("invalid connection authority transition");
+
+    await testEnv.DB.prepare(
+      `UPDATE connections
+       SET token_version = token_version + 1, dek_iv = 'refresh-dek',
+           wrapped_dek = 'refresh-wrapped', payload_iv = 'refresh-payload',
+           ciphertext = 'refresh-ciphertext',
+           refresh_lease_owner = NULL, refresh_lease_until = NULL,
+           refresh_lease_generation = NULL, refresh_lease_token_version = NULL,
+           discovery_lease_owner = NULL, discovery_lease_until = NULL,
+           discovery_lease_generation = NULL, discovery_lease_token_version = NULL,
+           updated_at = ?
+       WHERE id = 'connection-a' AND refresh_lease_owner = 'refresh-worker'
+       AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
+    )
+      .bind(NOW + 40)
+      .run();
+    await expect(
+      testEnv.DB.prepare(
+        `SELECT refresh_lease_owner, discovery_lease_owner, token_version
+         FROM connections WHERE id = 'connection-a'`,
+      ).first(),
+    ).resolves.toEqual({
+      refresh_lease_owner: null,
+      discovery_lease_owner: null,
+      token_version: 2,
+    });
+  });
+
+  it("clears both leases on reconnect and permits only named monotonic metadata", async () => {
+    await principal();
+    await identity();
+    await connection();
+    await acquireRefreshLease("refresh", NOW + 1, NOW + 31);
+    await acquireDiscoveryLease("discovery", NOW + 2, NOW + 32);
+    await testEnv.DB.prepare(
+      `UPDATE connections SET status = 'reconnect_required',
+       refresh_lease_owner = NULL, refresh_lease_until = NULL,
+       refresh_lease_generation = NULL, refresh_lease_token_version = NULL,
+       discovery_lease_owner = NULL, discovery_lease_until = NULL,
+       discovery_lease_generation = NULL, discovery_lease_token_version = NULL,
+       updated_at = ? WHERE id = 'connection-a'`,
+    )
+      .bind(NOW + 3)
+      .run();
+    await testEnv.DB.prepare(
+      `UPDATE connections SET last_provider_success_at = ?, updated_at = ?
+       WHERE id = 'connection-a'`,
+    )
+      .bind(NOW + 4, NOW + 4)
+      .run();
+    await expect(
+      testEnv.DB.prepare(
+        "UPDATE connections SET updated_at = ?, last_provider_success_at = ? WHERE id = 'connection-a'",
+      )
+        .bind(NOW + 3, NOW + 3)
+        .run(),
+    ).rejects.toThrow();
   });
 
   it("requires OAuth replacement to reactivate and advances the authority epoch", async () => {
@@ -283,6 +497,19 @@ describe("initial D1 schema invariants", () => {
         "UPDATE connections SET status = 'active', updated_at = ? WHERE id = 'connection-a'",
       )
         .bind(NOW + 2)
+        .run(),
+    ).rejects.toThrow("invalid connection authority transition");
+    await expect(
+      testEnv.DB.prepare(
+        `UPDATE connections
+         SET status = 'active', generation = 2, token_version = 2,
+             dek_iv = 'oauth-dek', wrapped_dek = 'oauth-wrapped',
+             payload_iv = 'oauth-payload', ciphertext = 'oauth-ciphertext',
+             discovery_lease_owner = 'forbidden', discovery_lease_until = ?,
+             discovery_lease_generation = 2, discovery_lease_token_version = 2, updated_at = ?
+         WHERE id = 'connection-a'`,
+      )
+        .bind(NOW + 32, NOW + 2)
         .run(),
     ).rejects.toThrow("invalid connection authority transition");
     await testEnv.DB.prepare(
@@ -517,6 +744,76 @@ describe("initial D1 schema invariants", () => {
         "UPDATE oauth_transactions SET id = id, intent = intent, expires_at = expires_at WHERE id = 'immutable'",
       ).run(),
     ).resolves.toMatchObject({ meta: { changes: 1 } });
+  });
+
+  it("bounds calendar storage and freezes provider and tenant bindings", async () => {
+    await principal();
+    await identity();
+    await connection();
+    await calendarResource();
+
+    await expect(
+      testEnv.DB.prepare(
+        "UPDATE calendars SET name = ?, description = ?, updated_at = ? WHERE id = 'calendar-a'",
+      )
+        .bind("😀".repeat(500), "😀".repeat(4000), NOW + 1)
+        .run(),
+    ).resolves.toMatchObject({ meta: { changes: 1 } });
+    for (const [column, value] of [
+      ["name", ""],
+      ["name", "😀".repeat(501)],
+      ["description", "😀".repeat(4001)],
+      ["color", "x".repeat(33)],
+      ["time_zone", ""],
+      ["time_zone", "x".repeat(101)],
+      ["access_role", "administrator"],
+    ] as const) {
+      await expect(
+        testEnv.DB.prepare(`UPDATE calendars SET ${column} = ? WHERE id = 'calendar-a'`)
+          .bind(value)
+          .run(),
+      ).rejects.toThrow();
+    }
+    for (const providerId of ["", "x".repeat(4097), "line\nbreak", "nul\u0000id"]) {
+      await expect(
+        calendarResource(
+          `calendar-${providerId.length}`,
+          "principal-a",
+          "connection-a",
+          providerId,
+        ),
+      ).rejects.toThrow();
+    }
+
+    for (const [column, value] of [
+      ["id", "calendar-other"],
+      ["principal_id", "principal-other"],
+      ["connection_id", "connection-other"],
+      ["provider_calendar_id", "provider-other"],
+      ["discovered_at", NOW + 1],
+      ["updated_at", NOW - 1],
+    ] as const) {
+      await expect(
+        testEnv.DB.prepare(`UPDATE calendars SET ${column} = ? WHERE id = 'calendar-a'`)
+          .bind(value)
+          .run(),
+      ).rejects.toThrow("calendar binding is immutable");
+    }
+    await expect(
+      testEnv.DB.prepare(
+        `UPDATE calendars SET id = id, principal_id = principal_id,
+         connection_id = connection_id, provider_calendar_id = provider_calendar_id,
+         discovered_at = discovered_at WHERE id = 'calendar-a'`,
+      ).run(),
+    ).resolves.toMatchObject({ meta: { changes: 1 } });
+
+    await principal("principal-b");
+    await identity("identity-b", "principal-b", "subject-b");
+    await connection("connection-b", "principal-b", "identity-b");
+    await expect(
+      calendarResource("calendar-cross-tenant", "principal-a", "connection-b", "provider-b"),
+    ).rejects.toThrow();
+    expect((await testEnv.DB.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   });
 
   it("retains the redemption FK, uniqueness, and ON DELETE SET NULL behavior", async () => {

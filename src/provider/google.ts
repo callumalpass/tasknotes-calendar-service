@@ -19,10 +19,14 @@ const MAX_ERROR_BYTES = 16_384;
 const MAX_ITEMS = 250;
 const MAX_TOKEN_BYTES = 16_384;
 const MAX_ID_BYTES = 4_096;
-const MAX_PAGE_TOKEN_BYTES = 8_192;
+const MAX_PAGE_TOKEN_BYTES = 1_024;
 const MAX_TIME_ZONE_BYTES = 256;
 const MAX_TITLE_BYTES = 2_048;
 const MAX_DESCRIPTION_BYTES = 32_768;
+const MAX_CALENDAR_NAME_CHARACTERS = 500;
+const MAX_CALENDAR_DESCRIPTION_CHARACTERS = 4_000;
+const MAX_CALENDAR_TIME_ZONE_CHARACTERS = 100;
+const PRINTABLE_PAGE_TOKEN_PATTERN = /^[\u0020-\u007e]+$/u;
 const MAX_LOCATION_BYTES = 8_192;
 const MAX_RETRY_AFTER_SECONDS = 3_600;
 const MAX_EVENT_RANGE_MS = 93 * 24 * 60 * 60 * 1_000;
@@ -282,12 +286,16 @@ function httpFailure(
   policy: HttpErrorPolicy,
 ): ProviderOutcome<never> {
   if (policy === "token" && response.status === 400 && isInvalidGrant(response, bytes))
-    return failure("unauthorized", "Provider authorization failed.");
-  if (response.status === 401 || response.status === 403) {
-    if (policy === "calendar" && response.status === 403 && isCalendarUsageLimit(response, bytes))
+    return failure("reauthorization_required", "Provider reauthorization is required.");
+  if (response.status === 401) return failure("unauthorized", "Provider authorization failed.");
+  if (policy === "calendar" && response.status === 403) {
+    if (isCalendarUsageLimit(response, bytes))
       return failure("rate_limited", "Provider rate limit was reached.", retryAfter(response));
-    return failure("unauthorized", "Provider authorization failed.");
+    return failure("permission_denied", "Provider permission was denied.");
   }
+  if (policy === "calendar" && response.status === 404)
+    return failure("not_found", "Provider resource was not found.");
+  if (response.status === 403) return failure("unauthorized", "Provider authorization failed.");
   if (response.status === 429)
     return failure("rate_limited", "Provider rate limit was reached.", retryAfter(response));
   if (response.status >= 500)
@@ -429,14 +437,22 @@ export async function revokeGoogleTokenBestEffort(
   );
 }
 
+function validPageToken(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    PRINTABLE_PAGE_TOKEN_PATTERN.test(value) &&
+    encoder.encode(value).length <= MAX_PAGE_TOKEN_BYTES
+  );
+}
+
 function pageToken(value: unknown): string | undefined | null {
   if (value === undefined) return undefined;
-  return boundedString(value, MAX_PAGE_TOKEN_BYTES) ?? null;
+  return validPageToken(value) ? value : null;
 }
 
 function addPageToken(url: URL, token: string | undefined): boolean {
   if (token === undefined) return true;
-  if (boundedString(token, MAX_PAGE_TOKEN_BYTES) === undefined) return false;
+  if (!validPageToken(token)) return false;
   url.searchParams.set("pageToken", token);
   return true;
 }
@@ -472,8 +488,12 @@ function optionalText(
 function normalizeCalendar(value: unknown): ProviderCalendar | undefined {
   if (!isRecord(value)) return undefined;
   const id = boundedString(value["id"], MAX_ID_BYTES);
-  const name = boundedString(value["summary"], MAX_TITLE_BYTES, true);
-  const description = optionalText(value["description"], MAX_DESCRIPTION_BYTES);
+  const name = optionalText(value["summary"], MAX_TITLE_BYTES, MAX_CALENDAR_NAME_CHARACTERS);
+  const description = optionalText(
+    value["description"],
+    MAX_DESCRIPTION_BYTES,
+    MAX_CALENDAR_DESCRIPTION_CHARACTERS,
+  );
   const zone = timeZone(value["timeZone"]);
   const role = value["accessRole"];
   const access =
@@ -486,9 +506,10 @@ function normalizeCalendar(value: unknown): ProviderCalendar | undefined {
           : undefined;
   if (
     !id ||
-    name === undefined ||
+    !name ||
     description === null ||
     zone === null ||
+    (zone !== undefined && Array.from(zone).length > MAX_CALENDAR_TIME_ZONE_CHARACTERS) ||
     access === undefined ||
     (value["primary"] !== undefined && typeof value["primary"] !== "boolean") ||
     (value["selected"] !== undefined && typeof value["selected"] !== "boolean")
@@ -677,7 +698,8 @@ export async function listGoogleCalendarsPage(
     "fields",
     "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)",
   );
-  if (!addPageToken(url, request.pageToken)) return invalidRequest();
+  if (!addPageToken(url, request.pageToken))
+    return failure("invalid_response", "Provider returned an invalid response.");
   let headers: Headers;
   try {
     headers = bearer(request.accessToken);
@@ -720,7 +742,8 @@ export async function listGoogleEventsPage(
     "fields",
     "nextPageToken,items(id,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
   );
-  if (!addPageToken(url, request.pageToken)) return invalidRequest();
+  if (!addPageToken(url, request.pageToken))
+    return failure("invalid_response", "Provider returned an invalid response.");
   let headers: Headers;
   try {
     headers = bearer(request.accessToken);

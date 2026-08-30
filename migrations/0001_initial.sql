@@ -100,10 +100,15 @@ CREATE TABLE connections (
   refresh_lease_until INTEGER,
   refresh_lease_generation INTEGER,
   refresh_lease_token_version INTEGER,
+  discovery_lease_owner TEXT,
+  discovery_lease_until INTEGER,
+  discovery_lease_generation INTEGER,
+  discovery_lease_token_version INTEGER,
   created_at INTEGER NOT NULL CHECK (created_at >= 0),
   updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
   last_provider_success_at INTEGER CHECK (
-    last_provider_success_at IS NULL OR last_provider_success_at >= created_at
+    last_provider_success_at IS NULL
+    OR last_provider_success_at BETWEEN created_at AND updated_at
   ),
   FOREIGN KEY (principal_id, identity_id)
     REFERENCES external_identities(principal_id, id) ON DELETE CASCADE,
@@ -119,10 +124,25 @@ CREATE TABLE connections (
       AND refresh_lease_until IS NOT NULL
       AND refresh_lease_generation IS NOT NULL
       AND refresh_lease_token_version IS NOT NULL
-      AND length(refresh_lease_owner) BETWEEN 1 AND 256
+      AND length(CAST(refresh_lease_owner AS BLOB)) BETWEEN 1 AND 256
       AND refresh_lease_until >= 0
       AND refresh_lease_generation = generation
       AND refresh_lease_token_version = token_version)
+  ),
+  CHECK (
+    (discovery_lease_owner IS NULL
+      AND discovery_lease_until IS NULL
+      AND discovery_lease_generation IS NULL
+      AND discovery_lease_token_version IS NULL)
+    OR
+    (discovery_lease_owner IS NOT NULL
+      AND discovery_lease_until IS NOT NULL
+      AND discovery_lease_generation IS NOT NULL
+      AND discovery_lease_token_version IS NOT NULL
+      AND length(CAST(discovery_lease_owner AS BLOB)) BETWEEN 1 AND 256
+      AND discovery_lease_until >= 0
+      AND discovery_lease_generation = generation
+      AND discovery_lease_token_version = token_version)
   )
 ) STRICT;
 
@@ -135,6 +155,10 @@ WHEN NEW.status IS NOT 'active'
   OR NEW.refresh_lease_until IS NOT NULL
   OR NEW.refresh_lease_generation IS NOT NULL
   OR NEW.refresh_lease_token_version IS NOT NULL
+  OR NEW.discovery_lease_owner IS NOT NULL
+  OR NEW.discovery_lease_until IS NOT NULL
+  OR NEW.discovery_lease_generation IS NOT NULL
+  OR NEW.discovery_lease_token_version IS NOT NULL
   OR NOT EXISTS (
     SELECT 1 FROM principals
     WHERE id = NEW.principal_id
@@ -170,12 +194,16 @@ BEFORE UPDATE ON connections
 FOR EACH ROW
 WHEN NEW.created_at IS NOT OLD.created_at
   OR NEW.updated_at < OLD.updated_at
+  OR (OLD.last_provider_success_at IS NOT NULL
+    AND (NEW.last_provider_success_at IS NULL
+      OR NEW.last_provider_success_at < OLD.last_provider_success_at))
   OR NOT (
+    -- OAuth replacement: advance both authorities, replace the complete envelope, and clear leases.
     (
       NEW.generation = OLD.generation + 1
       AND NEW.token_version = OLD.token_version + 1
-      AND NEW.status = 'active'
       AND OLD.status IN ('active', 'reconnect_required')
+      AND NEW.status = 'active'
       AND NEW.envelope_schema_version = OLD.envelope_schema_version
       AND NEW.key_version >= OLD.key_version
       AND NEW.dek_iv IS NOT OLD.dek_iv
@@ -186,6 +214,10 @@ WHEN NEW.created_at IS NOT OLD.created_at
       AND NEW.refresh_lease_until IS NULL
       AND NEW.refresh_lease_generation IS NULL
       AND NEW.refresh_lease_token_version IS NULL
+      AND NEW.discovery_lease_owner IS NULL
+      AND NEW.discovery_lease_until IS NULL
+      AND NEW.discovery_lease_generation IS NULL
+      AND NEW.discovery_lease_token_version IS NULL
       AND EXISTS (
         SELECT 1 FROM principals
         WHERE id = OLD.principal_id
@@ -193,12 +225,66 @@ WHEN NEW.created_at IS NOT OLD.created_at
       )
     )
     OR
+    -- Refresh lease acquisition or an expired lease steal.
     (
-      NEW.generation = OLD.generation
-      AND NEW.token_version = OLD.token_version + 1
+      NEW.last_provider_success_at IS OLD.last_provider_success_at
       AND OLD.status = 'active'
+      AND NEW.status IS OLD.status
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
+      AND NEW.key_version IS OLD.key_version
+      AND NEW.dek_iv IS OLD.dek_iv
+      AND NEW.wrapped_dek IS OLD.wrapped_dek
+      AND NEW.payload_iv IS OLD.payload_iv
+      AND NEW.ciphertext IS OLD.ciphertext
+      AND (OLD.refresh_lease_owner IS NULL OR OLD.refresh_lease_until <= NEW.updated_at)
+      AND NEW.refresh_lease_owner IS NOT NULL
+      AND NEW.refresh_lease_until > NEW.updated_at
+      AND NEW.refresh_lease_until <= NEW.updated_at + 60
+      AND NEW.refresh_lease_generation IS NEW.generation
+      AND NEW.refresh_lease_token_version IS NEW.token_version
+      AND NEW.discovery_lease_owner IS OLD.discovery_lease_owner
+      AND NEW.discovery_lease_until IS OLD.discovery_lease_until
+      AND NEW.discovery_lease_generation IS OLD.discovery_lease_generation
+      AND NEW.discovery_lease_token_version IS OLD.discovery_lease_token_version
+    )
+    OR
+    -- Refresh lease release. Callers bind the old owner/generation/version in their UPDATE predicate.
+    (
+      NEW.last_provider_success_at IS OLD.last_provider_success_at
+      AND OLD.refresh_lease_owner IS NOT NULL
+      AND OLD.refresh_lease_generation IS OLD.generation
+      AND OLD.refresh_lease_token_version IS OLD.token_version
+      AND NEW.refresh_lease_owner IS NULL
+      AND NEW.refresh_lease_until IS NULL
+      AND NEW.refresh_lease_generation IS NULL
+      AND NEW.refresh_lease_token_version IS NULL
+      AND NEW.status IS OLD.status
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
+      AND NEW.key_version IS OLD.key_version
+      AND NEW.dek_iv IS OLD.dek_iv
+      AND NEW.wrapped_dek IS OLD.wrapped_dek
+      AND NEW.payload_iv IS OLD.payload_iv
+      AND NEW.ciphertext IS OLD.ciphertext
+      AND NEW.discovery_lease_owner IS OLD.discovery_lease_owner
+      AND NEW.discovery_lease_until IS OLD.discovery_lease_until
+      AND NEW.discovery_lease_generation IS OLD.discovery_lease_generation
+      AND NEW.discovery_lease_token_version IS OLD.discovery_lease_token_version
+    )
+    OR
+    -- Refresh commit. Expiry is irrelevant; exact old lease authority is sufficient.
+    (
+      OLD.status = 'active'
       AND NEW.status = 'active'
-      AND NEW.envelope_schema_version = OLD.envelope_schema_version
+      AND OLD.refresh_lease_owner IS NOT NULL
+      AND OLD.refresh_lease_generation IS OLD.generation
+      AND OLD.refresh_lease_token_version IS OLD.token_version
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version = OLD.token_version + 1
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
       AND NEW.key_version >= OLD.key_version
       AND NEW.dek_iv IS NOT OLD.dek_iv
       AND NEW.wrapped_dek IS NOT OLD.wrapped_dek
@@ -208,13 +294,92 @@ WHEN NEW.created_at IS NOT OLD.created_at
       AND NEW.refresh_lease_until IS NULL
       AND NEW.refresh_lease_generation IS NULL
       AND NEW.refresh_lease_token_version IS NULL
+      AND NEW.discovery_lease_owner IS NULL
+      AND NEW.discovery_lease_until IS NULL
+      AND NEW.discovery_lease_generation IS NULL
+      AND NEW.discovery_lease_token_version IS NULL
     )
     OR
+    -- Calendar discovery lease acquisition or an expired lease steal.
     (
-      NEW.generation = OLD.generation
-      AND NEW.token_version = OLD.token_version
-      AND NEW.status = OLD.status
-      AND NEW.envelope_schema_version = OLD.envelope_schema_version
+      NEW.last_provider_success_at IS OLD.last_provider_success_at
+      AND OLD.status = 'active'
+      AND NEW.status IS OLD.status
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
+      AND NEW.key_version IS OLD.key_version
+      AND NEW.dek_iv IS OLD.dek_iv
+      AND NEW.wrapped_dek IS OLD.wrapped_dek
+      AND NEW.payload_iv IS OLD.payload_iv
+      AND NEW.ciphertext IS OLD.ciphertext
+      AND (OLD.discovery_lease_owner IS NULL OR OLD.discovery_lease_until <= NEW.updated_at)
+      AND NEW.discovery_lease_owner IS NOT NULL
+      AND NEW.discovery_lease_until > NEW.updated_at
+      AND NEW.discovery_lease_until <= NEW.updated_at + 60
+      AND NEW.discovery_lease_generation IS NEW.generation
+      AND NEW.discovery_lease_token_version IS NEW.token_version
+      AND NEW.refresh_lease_owner IS OLD.refresh_lease_owner
+      AND NEW.refresh_lease_until IS OLD.refresh_lease_until
+      AND NEW.refresh_lease_generation IS OLD.refresh_lease_generation
+      AND NEW.refresh_lease_token_version IS OLD.refresh_lease_token_version
+    )
+    OR
+    -- Calendar discovery lease release.
+    (
+      NEW.last_provider_success_at IS OLD.last_provider_success_at
+      AND OLD.discovery_lease_owner IS NOT NULL
+      AND OLD.discovery_lease_generation IS OLD.generation
+      AND OLD.discovery_lease_token_version IS OLD.token_version
+      AND NEW.discovery_lease_owner IS NULL
+      AND NEW.discovery_lease_until IS NULL
+      AND NEW.discovery_lease_generation IS NULL
+      AND NEW.discovery_lease_token_version IS NULL
+      AND NEW.status IS OLD.status
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
+      AND NEW.key_version IS OLD.key_version
+      AND NEW.dek_iv IS OLD.dek_iv
+      AND NEW.wrapped_dek IS OLD.wrapped_dek
+      AND NEW.payload_iv IS OLD.payload_iv
+      AND NEW.ciphertext IS OLD.ciphertext
+      AND NEW.refresh_lease_owner IS OLD.refresh_lease_owner
+      AND NEW.refresh_lease_until IS OLD.refresh_lease_until
+      AND NEW.refresh_lease_generation IS OLD.refresh_lease_generation
+      AND NEW.refresh_lease_token_version IS OLD.refresh_lease_token_version
+    )
+    OR
+    -- Provider rejection: preserve the envelope and versions, and revoke both lease capabilities.
+    (
+      NEW.last_provider_success_at IS OLD.last_provider_success_at
+      AND OLD.status = 'active'
+      AND NEW.status = 'reconnect_required'
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
+      AND NEW.key_version IS OLD.key_version
+      AND NEW.dek_iv IS OLD.dek_iv
+      AND NEW.wrapped_dek IS OLD.wrapped_dek
+      AND NEW.payload_iv IS OLD.payload_iv
+      AND NEW.ciphertext IS OLD.ciphertext
+      AND NEW.refresh_lease_owner IS NULL
+      AND NEW.refresh_lease_until IS NULL
+      AND NEW.refresh_lease_generation IS NULL
+      AND NEW.refresh_lease_token_version IS NULL
+      AND NEW.discovery_lease_owner IS NULL
+      AND NEW.discovery_lease_until IS NULL
+      AND NEW.discovery_lease_generation IS NULL
+      AND NEW.discovery_lease_token_version IS NULL
+    )
+    OR
+    -- KEK rewrap: only the wrapping key version, DEK IV, and wrapped DEK change.
+    (
+      NEW.last_provider_success_at IS OLD.last_provider_success_at
+      AND NEW.status IS OLD.status
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
       AND NEW.key_version > OLD.key_version
       AND NEW.dek_iv IS NOT OLD.dek_iv
       AND NEW.wrapped_dek IS NOT OLD.wrapped_dek
@@ -224,18 +389,31 @@ WHEN NEW.created_at IS NOT OLD.created_at
       AND NEW.refresh_lease_until IS OLD.refresh_lease_until
       AND NEW.refresh_lease_generation IS OLD.refresh_lease_generation
       AND NEW.refresh_lease_token_version IS OLD.refresh_lease_token_version
+      AND NEW.discovery_lease_owner IS OLD.discovery_lease_owner
+      AND NEW.discovery_lease_until IS OLD.discovery_lease_until
+      AND NEW.discovery_lease_generation IS OLD.discovery_lease_generation
+      AND NEW.discovery_lease_token_version IS OLD.discovery_lease_token_version
     )
     OR
+    -- Harmless metadata update: only updated_at and last_provider_success_at may differ.
     (
-      NEW.generation = OLD.generation
-      AND NEW.token_version = OLD.token_version
-      AND (NEW.status = OLD.status OR (OLD.status = 'active' AND NEW.status = 'reconnect_required'))
-      AND NEW.envelope_schema_version = OLD.envelope_schema_version
-      AND NEW.key_version = OLD.key_version
+      NEW.status IS OLD.status
+      AND NEW.generation IS OLD.generation
+      AND NEW.token_version IS OLD.token_version
+      AND NEW.envelope_schema_version IS OLD.envelope_schema_version
+      AND NEW.key_version IS OLD.key_version
       AND NEW.dek_iv IS OLD.dek_iv
       AND NEW.wrapped_dek IS OLD.wrapped_dek
       AND NEW.payload_iv IS OLD.payload_iv
       AND NEW.ciphertext IS OLD.ciphertext
+      AND NEW.refresh_lease_owner IS OLD.refresh_lease_owner
+      AND NEW.refresh_lease_until IS OLD.refresh_lease_until
+      AND NEW.refresh_lease_generation IS OLD.refresh_lease_generation
+      AND NEW.refresh_lease_token_version IS OLD.refresh_lease_token_version
+      AND NEW.discovery_lease_owner IS OLD.discovery_lease_owner
+      AND NEW.discovery_lease_until IS OLD.discovery_lease_until
+      AND NEW.discovery_lease_generation IS OLD.discovery_lease_generation
+      AND NEW.discovery_lease_token_version IS OLD.discovery_lease_token_version
     )
   )
 BEGIN
@@ -608,14 +786,62 @@ CREATE TABLE calendars (
   id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL,
   connection_id TEXT NOT NULL,
-  provider_calendar_id TEXT NOT NULL,
-  name TEXT NOT NULL,
-  description TEXT,
-  color TEXT,
-  time_zone TEXT,
-  access_role TEXT,
+  provider_calendar_id TEXT NOT NULL CHECK (
+    length(CAST(provider_calendar_id AS BLOB)) BETWEEN 1 AND 4096
+    AND instr(provider_calendar_id, char(0)) = 0
+    AND instr(provider_calendar_id, char(1)) = 0
+    AND instr(provider_calendar_id, char(2)) = 0
+    AND instr(provider_calendar_id, char(3)) = 0
+    AND instr(provider_calendar_id, char(4)) = 0
+    AND instr(provider_calendar_id, char(5)) = 0
+    AND instr(provider_calendar_id, char(6)) = 0
+    AND instr(provider_calendar_id, char(7)) = 0
+    AND instr(provider_calendar_id, char(8)) = 0
+    AND instr(provider_calendar_id, char(9)) = 0
+    AND instr(provider_calendar_id, char(10)) = 0
+    AND instr(provider_calendar_id, char(11)) = 0
+    AND instr(provider_calendar_id, char(12)) = 0
+    AND instr(provider_calendar_id, char(13)) = 0
+    AND instr(provider_calendar_id, char(14)) = 0
+    AND instr(provider_calendar_id, char(15)) = 0
+    AND instr(provider_calendar_id, char(16)) = 0
+    AND instr(provider_calendar_id, char(17)) = 0
+    AND instr(provider_calendar_id, char(18)) = 0
+    AND instr(provider_calendar_id, char(19)) = 0
+    AND instr(provider_calendar_id, char(20)) = 0
+    AND instr(provider_calendar_id, char(21)) = 0
+    AND instr(provider_calendar_id, char(22)) = 0
+    AND instr(provider_calendar_id, char(23)) = 0
+    AND instr(provider_calendar_id, char(24)) = 0
+    AND instr(provider_calendar_id, char(25)) = 0
+    AND instr(provider_calendar_id, char(26)) = 0
+    AND instr(provider_calendar_id, char(27)) = 0
+    AND instr(provider_calendar_id, char(28)) = 0
+    AND instr(provider_calendar_id, char(29)) = 0
+    AND instr(provider_calendar_id, char(30)) = 0
+    AND instr(provider_calendar_id, char(31)) = 0
+    AND instr(provider_calendar_id, char(127)) = 0
+  ),
+  name TEXT NOT NULL CHECK (
+    length(name) BETWEEN 1 AND 500
+    AND length(CAST(name AS BLOB)) BETWEEN 1 AND 2000
+  ),
+  description TEXT CHECK (
+    description IS NULL
+    OR (length(description) <= 4000 AND length(CAST(description AS BLOB)) <= 16000)
+  ),
+  color TEXT CHECK (
+    color IS NULL OR (length(color) <= 32 AND length(CAST(color AS BLOB)) <= 128)
+  ),
+  time_zone TEXT CHECK (
+    time_zone IS NULL
+    OR (length(time_zone) BETWEEN 1 AND 100 AND length(CAST(time_zone AS BLOB)) <= 400)
+  ),
+  access_role TEXT CHECK (
+    access_role IS NULL OR access_role IN ('reader', 'writer', 'owner')
+  ),
   is_primary INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
-  etag TEXT,
+  etag TEXT CHECK (etag IS NULL OR length(CAST(etag AS BLOB)) <= 4096),
   discovered_at INTEGER NOT NULL CHECK (discovered_at >= 0),
   updated_at INTEGER NOT NULL CHECK (updated_at >= discovered_at),
   FOREIGN KEY (principal_id, connection_id)
@@ -624,3 +850,16 @@ CREATE TABLE calendars (
   UNIQUE (principal_id, id)
 ) STRICT;
 CREATE INDEX calendars_connection_idx ON calendars(principal_id, connection_id);
+
+CREATE TRIGGER calendars_immutable_binding
+BEFORE UPDATE ON calendars
+FOR EACH ROW
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.principal_id IS NOT OLD.principal_id
+  OR NEW.connection_id IS NOT OLD.connection_id
+  OR NEW.provider_calendar_id IS NOT OLD.provider_calendar_id
+  OR NEW.discovered_at IS NOT OLD.discovered_at
+  OR NEW.updated_at < OLD.updated_at
+BEGIN
+  SELECT RAISE(ABORT, 'calendar binding is immutable');
+END;

@@ -6,8 +6,10 @@ const CURSOR_VERSION = 1 as const;
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
-const MAX_CURSOR_BYTES = 4096;
-const MAX_PAGE_TOKEN_BYTES = 2048;
+const MAX_CURSOR_BYTES = 2048;
+const MAX_PAGE_TOKEN_BYTES = 1024;
+const EXPIRY_BYTES = 8;
+const PRINTABLE_PAGE_TOKEN_PATTERN = /^[\u0020-\u007e]+$/u;
 const MAX_LIFETIME_SECONDS = 600;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -43,6 +45,11 @@ function assertBoundedText(value: string, name: string, maximumBytes: number): v
   }
 }
 
+function assertPageToken(value: string): void {
+  assertBoundedText(value, "pageToken", MAX_PAGE_TOKEN_BYTES);
+  if (!PRINTABLE_PAGE_TOKEN_PATTERN.test(value)) throw new TypeError("pageToken is invalid");
+}
+
 function validateBinding(binding: EventCursorBinding): void {
   assertBoundedText(binding.principalId, "principalId", 256);
   assertBoundedText(binding.connectionId, "connectionId", 256);
@@ -75,33 +82,31 @@ async function importKey(rawKey: Uint8Array): Promise<CryptoKey> {
   ]);
 }
 
-function parsePayload(value: unknown, nowEpochSeconds: number): EventCursorPayload {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    Object.keys(value).length !== 2 ||
-    !("pageToken" in value) ||
-    !("expiresAtEpochSeconds" in value) ||
-    typeof value.pageToken !== "string" ||
-    typeof value.expiresAtEpochSeconds !== "number"
-  ) {
+function serializePayload(payload: EventCursorPayload): Uint8Array {
+  const token = textEncoder.encode(payload.pageToken);
+  const bytes = new Uint8Array(EXPIRY_BYTES + token.length);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(payload.expiresAtEpochSeconds));
+  bytes.set(token, EXPIRY_BYTES);
+  return bytes;
+}
+
+function parsePayload(value: ArrayBuffer, nowEpochSeconds: number): EventCursorPayload {
+  const bytes = new Uint8Array(value);
+  if (bytes.length <= EXPIRY_BYTES || bytes.length > EXPIRY_BYTES + MAX_PAGE_TOKEN_BYTES) {
     throw new TypeError("cursor payload is invalid");
   }
-
-  assertBoundedText(value.pageToken, "pageToken", MAX_PAGE_TOKEN_BYTES);
+  const expiresAtEpochSeconds = Number(new DataView(value).getBigUint64(0));
+  const pageToken = textDecoder.decode(bytes.subarray(EXPIRY_BYTES));
+  assertPageToken(pageToken);
   if (
-    !Number.isSafeInteger(value.expiresAtEpochSeconds) ||
-    value.expiresAtEpochSeconds <= nowEpochSeconds ||
-    value.expiresAtEpochSeconds > nowEpochSeconds + MAX_LIFETIME_SECONDS
+    !Number.isSafeInteger(expiresAtEpochSeconds) ||
+    expiresAtEpochSeconds <= nowEpochSeconds ||
+    expiresAtEpochSeconds > nowEpochSeconds + MAX_LIFETIME_SECONDS
   ) {
     throw new TypeError("cursor expiry is invalid");
   }
 
-  return {
-    pageToken: value.pageToken,
-    expiresAtEpochSeconds: value.expiresAtEpochSeconds,
-  };
+  return { pageToken, expiresAtEpochSeconds };
 }
 
 export async function sealEventCursor(
@@ -112,13 +117,13 @@ export async function sealEventCursor(
   random: RandomByteSource = webCryptoRandom,
 ): Promise<string> {
   try {
-    assertBoundedText(pageToken, "pageToken", MAX_PAGE_TOKEN_BYTES);
+    assertPageToken(pageToken);
     if (!Number.isSafeInteger(nowEpochSeconds) || nowEpochSeconds < 0) {
       throw new TypeError("current time is invalid");
     }
     const expiresAtEpochSeconds = nowEpochSeconds + MAX_LIFETIME_SECONDS;
     const iv = randomBytes(random, IV_BYTES);
-    const plaintext = textEncoder.encode(JSON.stringify({ pageToken, expiresAtEpochSeconds }));
+    const plaintext = serializePayload({ pageToken, expiresAtEpochSeconds });
     const ciphertext = new Uint8Array(
       await crypto.subtle.encrypt(
         {
@@ -173,8 +178,7 @@ export async function openEventCursor(
       await importKey(rawKey),
       asArrayBuffer(ciphertext),
     );
-    return parsePayload(JSON.parse(textDecoder.decode(plaintext)) as unknown, nowEpochSeconds)
-      .pageToken;
+    return parsePayload(plaintext, nowEpochSeconds).pageToken;
   } catch {
     throw new CursorError();
   }

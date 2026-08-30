@@ -90,12 +90,21 @@ describe("event cursors", () => {
 
   it.each([
     ["empty page token", "", BINDING, NOW, KEY],
-    ["oversized page token", "x".repeat(2049), BINDING, NOW, KEY],
-    ["escape-expanded page token", String.fromCharCode(0).repeat(2048), BINDING, NOW, KEY],
+    ["oversized page token", "x".repeat(1025), BINDING, NOW, KEY],
+    ["control-bearing page token", `page${String.fromCharCode(0)}`, BINDING, NOW, KEY],
     ["invalid generation", "page", { ...BINDING, connectionGeneration: 0 }, NOW, KEY],
     ["invalid time", "page", BINDING, -1, KEY],
     ["short key", "page", BINDING, NOW, KEY.subarray(0, 31)],
   ] as const)("rejects %s while sealing", async (_name, token, binding, now, key) => {
     await expect(sealEventCursor(token, binding, now, key)).rejects.toBeInstanceOf(CursorError);
+  });
+
+  it("accepts a hostile 1024-byte token while guaranteeing the public cursor limit", async () => {
+    const token = `"\\${"x".repeat(1022)}`;
+    const cursor = await sealEventCursor(token, BINDING, NOW, KEY, deterministicRandom(7));
+
+    expect(new TextEncoder().encode(token)).toHaveLength(1024);
+    expect(cursor.length).toBeLessThanOrEqual(2048);
+    await expect(openEventCursor(cursor, BINDING, NOW, KEY)).resolves.toBe(token);
   });
 });
