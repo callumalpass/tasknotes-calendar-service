@@ -11,7 +11,16 @@ const CONTROL_ORIGIN = "https://fake-google-control.test";
 const CANONICAL_ISSUER = "https://accounts.google.com";
 const IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
 const MAX_FORM_BYTES = 8_192;
+const MAX_CONTROL_BYTES = 262_144;
 const MAX_VALUE_BYTES = 2_048;
+const MAX_ITEMS = 250;
+const MAX_PAGE_TOKEN_BYTES = 1_024;
+const CALENDAR_LIST_FIELDS =
+  "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)";
+const EVENTS_FIELDS =
+  "nextPageToken,items(id,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))";
+const STATIC_ACCESS_TOKEN = "fake-access";
+const INITIAL_REFRESH_TOKEN = "fake-refresh-token-000000000000000000001";
 const encoder = new TextEncoder();
 
 // Generated once for this test fake. It is not accepted outside the isolated test runtime.
@@ -53,24 +62,75 @@ type FakeTokenMode =
   | "rate_limited"
   | "stall"
   | "consume_then_fail";
-type FakeCalendarMode = "success" | "rate_limited" | "malformed";
+type FakeRefreshMode =
+  | "success"
+  | "rotate"
+  | "omit_refresh"
+  | "omit_scope"
+  | "invalid_grant"
+  | "writable_scope"
+  | "unknown_scope"
+  | "rate_limited"
+  | "server_error"
+  | "malformed_json"
+  | "malformed_shape"
+  | "oversized_declared"
+  | "oversized_streamed"
+  | "stall";
+type FakeCalendarMode =
+  | "success"
+  | "unauthorized"
+  | "permission_denied"
+  | "quota_exceeded"
+  | "rate_limited"
+  | "not_found"
+  | "server_error"
+  | "malformed_json"
+  | "malformed_shape"
+  | "oversized_declared"
+  | "oversized_streamed"
+  | "stall";
+interface FakeCalendarPage {
+  items: Record<string, unknown>[];
+  nextPageToken?: string;
+}
+interface FakeEventsPage extends FakeCalendarPage {
+  calendarId: string;
+}
 interface FakeGoogleConfiguration {
   authorization?: "success" | "access_denied" | "unknown_error";
   token?: FakeTokenMode;
+  refresh?: FakeRefreshMode;
   calendar?: FakeCalendarMode;
   calendarEnabled?: boolean;
   subject?: string;
   email?: string;
+  calendarPages?: FakeCalendarPage[];
+  eventPages?: FakeEventsPage[];
+}
+interface ActiveConfiguration {
+  authorization: "success" | "access_denied" | "unknown_error";
+  token: FakeTokenMode;
+  refresh: FakeRefreshMode;
+  calendar: FakeCalendarMode;
+  calendarEnabled: boolean;
+  subject: string;
+  email: string;
+  calendarPages: FakeCalendarPage[];
+  eventPages: FakeEventsPage[];
 }
 interface FakeGoogleStats {
   authorizationRequests: number;
   tokenRequests: number;
   uniqueCodeExchanges: number;
+  refreshRequests: number;
+  successfulRefreshes: number;
   revokeCalls: number;
   calendarCalls: number;
+  calendarListCalls: number;
+  eventCalls: number;
   rejectedRequests: number;
 }
-
 interface CodeRecord {
   nonce: string;
   redirectUri: string;
@@ -78,28 +138,58 @@ interface CodeRecord {
   scopes: string[];
   challenge: string;
 }
+interface RefreshRecord {
+  clientId: string;
+  scopes: string[];
+}
 
 const codes = new Map<string, CodeRecord>();
-let configuration: Required<FakeGoogleConfiguration>;
+const refreshRecords = new Map<string, RefreshRecord>();
+const accessTokens = new Set<string>();
+let configuration: ActiveConfiguration;
 let stats: FakeGoogleStats;
+let refreshSequence = 0;
 let signingKey: Promise<CryptoKey> | undefined;
 
 function reset(): void {
   codes.clear();
+  refreshRecords.clear();
+  accessTokens.clear();
+  accessTokens.add(STATIC_ACCESS_TOKEN);
+  refreshSequence = 0;
   configuration = {
     authorization: "success",
     token: "success",
+    refresh: "success",
     calendar: "success",
     calendarEnabled: false,
     subject: "fake-google-subject-001",
     email: "fake.user@example.test",
+    calendarPages: [
+      {
+        items: [
+          {
+            id: "fake-calendar",
+            summary: "Fake Calendar",
+            accessRole: "reader",
+            primary: true,
+            selected: true,
+          },
+        ],
+      },
+    ],
+    eventPages: [{ calendarId: "fake-calendar", items: [] }],
   };
   stats = {
     authorizationRequests: 0,
     tokenRequests: 0,
     uniqueCodeExchanges: 0,
+    refreshRequests: 0,
+    successfulRefreshes: 0,
     revokeCalls: 0,
     calendarCalls: 0,
+    calendarListCalls: 0,
+    eventCalls: 0,
     rejectedRequests: 0,
   };
 }
@@ -268,18 +358,8 @@ async function sign(payload: Record<string, unknown>, wrongKid: boolean): Promis
   return `${header}.${body}.${base64Url(new Uint8Array(signature))}`;
 }
 
-async function token(request: Request): Promise<Response> {
+async function authorizationCodeToken(form: URLSearchParams): Promise<Response> {
   stats.tokenRequests += 1;
-  if (request.method !== "POST") return reject(405);
-  const form = await strictForm(request, [
-    "grant_type",
-    "code",
-    "client_id",
-    "client_secret",
-    "redirect_uri",
-    "code_verifier",
-  ]);
-  if (form === undefined) return reject(400);
   const code = form.get("code") ?? "";
   if (
     form.get("grant_type") !== "authorization_code" ||
@@ -345,9 +425,157 @@ async function token(request: Request): Promise<Response> {
       mode === "writable_scope"
         ? `${record.scopes.join(" ")} https://www.googleapis.com/auth/calendar`
         : record.scopes.join(" ");
-  if (calendar && mode !== "missing_refresh_token")
-    response["refresh_token"] = "fake-refresh-token-000000000000000000001";
+  if (calendar && mode !== "missing_refresh_token") {
+    response["refresh_token"] = INITIAL_REFRESH_TOKEN;
+    refreshRecords.set(INITIAL_REFRESH_TOKEN, {
+      clientId: record.clientId,
+      scopes: [...record.scopes],
+    });
+  }
+  accessTokens.add(String(response["access_token"]));
   return json(response);
+}
+
+function malformedJson(): Response {
+  return new Response("{not-json", {
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+  });
+}
+
+function oversizedDeclared(): Response {
+  return new Response("{}", {
+    headers: {
+      "content-type": "application/json",
+      "content-length": "1048577",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function oversizedStreamed(): Response {
+  const chunk = new Uint8Array(1_048_577).fill(0x20);
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(chunk);
+        controller.close();
+      },
+    }),
+    {
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+    },
+  );
+}
+
+function stalledBody(): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("{"));
+        setTimeout(() => controller.close(), 60_000);
+      },
+    }),
+    {
+      headers: { "content-type": "application/json", "cache-control": "no-store" },
+    },
+  );
+}
+
+function fault(
+  mode: FakeRefreshMode | FakeCalendarMode,
+  malformedShape: unknown,
+): Response | undefined {
+  if (mode === "rate_limited")
+    return json({ error: "temporarily_unavailable" }, 429, { "retry-after": "2" });
+  if (mode === "server_error") return json({ error: "server_error" }, 500);
+  if (mode === "malformed_json") return malformedJson();
+  if (mode === "malformed_shape") return json(malformedShape);
+  if (mode === "oversized_declared") return oversizedDeclared();
+  if (mode === "oversized_streamed") return oversizedStreamed();
+  if (mode === "stall") return stalledBody();
+  return undefined;
+}
+
+function refreshToken(form: URLSearchParams): Response {
+  stats.refreshRequests += 1;
+  const presented = form.get("refresh_token") ?? "";
+  const record = refreshRecords.get(presented);
+  if (
+    form.get("grant_type") !== "refresh_token" ||
+    form.get("client_id") !== FAKE_GOOGLE_CLIENT_ID ||
+    form.get("client_secret") !== FAKE_GOOGLE_CLIENT_SECRET ||
+    !bounded(presented, 16_384) ||
+    record?.clientId !== form.get("client_id")
+  )
+    return json({ error: "invalid_grant" }, 400);
+
+  const mode = configuration.refresh;
+  configuration.refresh = "success";
+  if (mode === "invalid_grant") return json({ error: "invalid_grant" }, 400);
+  const failed = fault(mode, { access_token: 7, expires_in: "soon", token_type: false });
+  if (failed !== undefined) return failed;
+
+  // Record mutation and success accounting happen without an await, so rotation is atomic in-isolate.
+  const accessToken = `fake-refreshed-access-${String(++refreshSequence).padStart(6, "0")}`;
+  accessTokens.add(accessToken);
+  const response: Record<string, unknown> = {
+    access_token: accessToken,
+    expires_in: 3_600,
+    token_type: "Bearer",
+  };
+  if (mode !== "omit_scope") {
+    response["scope"] =
+      mode === "writable_scope"
+        ? `${record.scopes.join(" ")} https://www.googleapis.com/auth/calendar`
+        : mode === "unknown_scope"
+          ? `${record.scopes.join(" ")} fake.unknown.scope`
+          : record.scopes.join(" ");
+  }
+  if (mode !== "omit_refresh") {
+    if (mode === "rotate") {
+      const rotated = `fake-refresh-token-rotated-${String(refreshSequence).padStart(6, "0")}`;
+      refreshRecords.delete(presented);
+      refreshRecords.set(rotated, record);
+      response["refresh_token"] = rotated;
+    } else {
+      response["refresh_token"] = presented;
+    }
+  }
+  stats.successfulRefreshes += 1;
+  return json(response);
+}
+
+async function token(request: Request): Promise<Response> {
+  if (request.method !== "POST") return reject(405);
+  const contentType = request.headers.get("content-type")?.trim().toLowerCase();
+  const declared = request.headers.get("content-length");
+  if (
+    contentType !== "application/x-www-form-urlencoded" ||
+    (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > MAX_FORM_BYTES))
+  )
+    return reject(400);
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > MAX_FORM_BYTES) return reject(400);
+  const form = new URLSearchParams(new TextDecoder().decode(bytes));
+  const grant = form.get("grant_type");
+  if (
+    grant === "authorization_code" &&
+    exactParameters(form, [
+      "grant_type",
+      "code",
+      "client_id",
+      "client_secret",
+      "redirect_uri",
+      "code_verifier",
+    ])
+  )
+    return authorizationCodeToken(form);
+  if (
+    grant === "refresh_token" &&
+    exactParameters(form, ["client_id", "client_secret", "refresh_token", "grant_type"])
+  )
+    return refreshToken(form);
+  return reject(400);
 }
 
 async function revoke(request: Request): Promise<Response> {
@@ -359,51 +587,225 @@ async function revoke(request: Request): Promise<Response> {
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 }
 
-function calendar(request: Request, url: URL): Response {
-  if (
-    !configuration.calendarEnabled ||
-    request.method !== "GET" ||
-    !/^Bearer [\x21-\x7e]{1,16384}$/u.test(request.headers.get("authorization") ?? "")
-  )
-    return reject(request.method === "GET" ? 404 : 405);
-  const list = url.pathname === "/calendar/v3/users/me/calendarList";
-  const events = /^\/calendar\/v3\/calendars\/[^/]+\/events$/u.test(url.pathname);
-  if (!list && !events) return reject(404);
-  stats.calendarCalls += 1;
-  const mode = configuration.calendar;
-  configuration.calendar = "success";
+function authorizedCalendarRequest(request: Request): boolean {
+  const authorization = request.headers.get("authorization") ?? "";
+  return (
+    request.headers.get("accept") === "application/json" &&
+    authorization.startsWith("Bearer ") &&
+    accessTokens.has(authorization.slice("Bearer ".length))
+  );
+}
+
+function selectedPage<T extends FakeCalendarPage>(pages: T[], token: string | null): T | undefined {
+  if (token === null) return pages[0];
+  const index = pages.findIndex((page) => page.nextPageToken === token);
+  return index < 0 ? undefined : pages[index + 1];
+}
+
+function calendarFault(mode: FakeCalendarMode): Response | undefined {
+  if (mode === "unauthorized") return json({ error: { message: "unauthorized" } }, 401);
+  if (mode === "permission_denied")
+    return json({ error: { errors: [{ reason: "forbidden" }] } }, 403);
+  if (mode === "quota_exceeded")
+    return json({ error: { errors: [{ reason: "quotaExceeded" }] } }, 403, { "retry-after": "4" });
+  if (mode === "not_found") return json({ error: { message: "not found" } }, 404);
   if (mode === "rate_limited")
     return json({ error: { errors: [{ reason: "rateLimitExceeded" }] } }, 429, {
       "retry-after": "3",
     });
-  if (mode === "malformed") return json({ items: "not-an-array" });
-  if (list)
-    return json({
-      items: [
-        {
-          id: "fake-calendar",
-          summary: "Fake Calendar",
-          accessRole: "reader",
-          primary: true,
-          selected: true,
-        },
-      ],
-    });
-  return json({ items: [] });
+  return fault(mode, { items: "not-an-array" });
+}
+
+function calendar(request: Request, url: URL): Response {
+  if (!configuration.calendarEnabled) return reject(404);
+  if (request.method !== "GET") return reject(405);
+  if (!authorizedCalendarRequest(request)) return reject(401);
+
+  const list = url.pathname === "/calendar/v3/users/me/calendarList";
+  const match = /^\/calendar\/v3\/calendars\/([^/]+)\/events$/u.exec(url.pathname);
+  if (!list && match === null) return reject(404);
+  const pageToken = url.searchParams.get("pageToken");
+  if (list) {
+    const names =
+      pageToken === null ? ["maxResults", "fields"] : ["maxResults", "fields", "pageToken"];
+    if (
+      !exactParameters(url.searchParams, names) ||
+      url.searchParams.get("maxResults") !== "250" ||
+      url.searchParams.get("fields") !== CALENDAR_LIST_FIELDS
+    )
+      return reject(400);
+    const page = selectedPage(configuration.calendarPages, pageToken);
+    if (page === undefined) return reject(400);
+    stats.calendarCalls += 1;
+    stats.calendarListCalls += 1;
+    const mode = configuration.calendar;
+    configuration.calendar = "success";
+    return calendarFault(mode) ?? json(page);
+  }
+
+  let calendarId: string;
+  try {
+    calendarId = decodeURIComponent(match?.[1] ?? "");
+  } catch {
+    return reject(400);
+  }
+  if (!boundedOpaque(calendarId, 4_096)) return reject(400);
+  const names = [
+    "maxResults",
+    "singleEvents",
+    "showDeleted",
+    "orderBy",
+    "timeMin",
+    "timeMax",
+    "fields",
+    ...(pageToken === null ? [] : ["pageToken"]),
+  ];
+  if (
+    !exactParameters(url.searchParams, names) ||
+    url.searchParams.get("maxResults") !== "250" ||
+    url.searchParams.get("singleEvents") !== "true" ||
+    url.searchParams.get("showDeleted") !== "true" ||
+    url.searchParams.get("orderBy") !== "startTime" ||
+    url.searchParams.get("fields") !== EVENTS_FIELDS ||
+    !bounded(url.searchParams.get("timeMin") ?? "", 64) ||
+    !bounded(url.searchParams.get("timeMax") ?? "", 64)
+  )
+    return reject(400);
+  const pages = configuration.eventPages.filter((page) => page.calendarId === calendarId);
+  const page = selectedPage(pages, pageToken);
+  if (page === undefined) return reject(404);
+  stats.calendarCalls += 1;
+  stats.eventCalls += 1;
+  const mode = configuration.calendar;
+  configuration.calendar = "success";
+  return (
+    calendarFault(mode) ??
+    json({
+      items: page.items,
+      ...(page.nextPageToken === undefined ? {} : { nextPageToken: page.nextPageToken }),
+    })
+  );
+}
+
+function recordWithKeys(
+  value: unknown,
+  allowed: readonly string[],
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).every((key) => allowed.includes(key))
+  );
+}
+function optionalString(value: unknown, maximum: number): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "string" && encoder.encode(value).byteLength <= maximum)
+  );
+}
+function boundedOpaque(value: unknown, maximum: number): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && encoder.encode(value).byteLength <= maximum
+  );
+}
+function validBoundary(value: unknown): boolean {
+  return (
+    recordWithKeys(value, ["date", "dateTime", "timeZone"]) &&
+    optionalString(value["date"], 10) &&
+    optionalString(value["dateTime"], 64) &&
+    optionalString(value["timeZone"], 256)
+  );
+}
+function validCalendarItem(value: unknown): value is Record<string, unknown> {
+  if (
+    !recordWithKeys(value, [
+      "id",
+      "summary",
+      "description",
+      "timeZone",
+      "accessRole",
+      "primary",
+      "selected",
+    ])
+  )
+    return false;
+  return (
+    boundedOpaque(value["id"], 4_096) &&
+    typeof value["summary"] === "string" &&
+    encoder.encode(value["summary"]).byteLength <= 2_048 &&
+    optionalString(value["description"], 32_768) &&
+    optionalString(value["timeZone"], 256) &&
+    ["freeBusyReader", "reader", "writer", "owner"].includes(String(value["accessRole"])) &&
+    (value["primary"] === undefined || typeof value["primary"] === "boolean") &&
+    (value["selected"] === undefined || typeof value["selected"] === "boolean")
+  );
+}
+function validEventItem(value: unknown): value is Record<string, unknown> {
+  if (
+    !recordWithKeys(value, [
+      "id",
+      "status",
+      "updated",
+      "summary",
+      "description",
+      "location",
+      "transparency",
+      "start",
+      "end",
+      "recurringEventId",
+      "originalStartTime",
+    ])
+  )
+    return false;
+  return (
+    boundedOpaque(value["id"], 4_096) &&
+    typeof value["updated"] === "string" &&
+    bounded(value["updated"], 64) &&
+    ["confirmed", "tentative", "cancelled"].includes(String(value["status"])) &&
+    optionalString(value["summary"], 2_048) &&
+    optionalString(value["description"], 32_768) &&
+    optionalString(value["location"], 8_192) &&
+    optionalString(value["recurringEventId"], 4_096) &&
+    (value["transparency"] === undefined ||
+      value["transparency"] === "opaque" ||
+      value["transparency"] === "transparent") &&
+    (value["start"] === undefined || validBoundary(value["start"])) &&
+    (value["end"] === undefined || validBoundary(value["end"])) &&
+    (value["originalStartTime"] === undefined || validBoundary(value["originalStartTime"]))
+  );
+}
+function validPages(value: unknown, events: boolean): boolean {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16) return false;
+  return value.every(
+    (page) =>
+      recordWithKeys(
+        page,
+        events ? ["calendarId", "items", "nextPageToken"] : ["items", "nextPageToken"],
+      ) &&
+      (!events || boundedOpaque(page["calendarId"], 4_096)) &&
+      Array.isArray(page["items"]) &&
+      page["items"].length <= MAX_ITEMS &&
+      page["items"].every(events ? validEventItem : validCalendarItem) &&
+      optionalString(page["nextPageToken"], MAX_PAGE_TOKEN_BYTES + 1),
+  );
 }
 
 function validConfiguration(value: unknown): value is FakeGoogleConfiguration {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  const allowed = new Set([
-    "authorization",
-    "token",
-    "calendar",
-    "calendarEnabled",
-    "subject",
-    "email",
-  ]);
-  if (Object.keys(record).some((key) => !allowed.has(key))) return false;
+  if (
+    !recordWithKeys(value, [
+      "authorization",
+      "token",
+      "refresh",
+      "calendar",
+      "calendarEnabled",
+      "subject",
+      "email",
+      "calendarPages",
+      "eventPages",
+    ])
+  )
+    return false;
   const auth = ["success", "access_denied", "unknown_error"];
   const tokenModes: FakeTokenMode[] = [
     "success",
@@ -421,17 +823,50 @@ function validConfiguration(value: unknown): value is FakeGoogleConfiguration {
     "stall",
     "consume_then_fail",
   ];
-  const calendarModes: FakeCalendarMode[] = ["success", "rate_limited", "malformed"];
+  const refreshModes: FakeRefreshMode[] = [
+    "success",
+    "rotate",
+    "omit_refresh",
+    "omit_scope",
+    "invalid_grant",
+    "writable_scope",
+    "unknown_scope",
+    "rate_limited",
+    "server_error",
+    "malformed_json",
+    "malformed_shape",
+    "oversized_declared",
+    "oversized_streamed",
+    "stall",
+  ];
+  const calendarModes: FakeCalendarMode[] = [
+    "success",
+    "unauthorized",
+    "permission_denied",
+    "quota_exceeded",
+    "rate_limited",
+    "not_found",
+    "server_error",
+    "malformed_json",
+    "malformed_shape",
+    "oversized_declared",
+    "oversized_streamed",
+    "stall",
+  ];
   return (
-    (record["authorization"] === undefined || auth.includes(record["authorization"] as string)) &&
-    (record["token"] === undefined || tokenModes.includes(record["token"] as FakeTokenMode)) &&
-    (record["calendar"] === undefined ||
-      calendarModes.includes(record["calendar"] as FakeCalendarMode)) &&
-    (record["calendarEnabled"] === undefined || typeof record["calendarEnabled"] === "boolean") &&
-    (record["subject"] === undefined ||
-      (typeof record["subject"] === "string" && bounded(record["subject"], 255))) &&
-    (record["email"] === undefined ||
-      (typeof record["email"] === "string" && bounded(record["email"], 320)))
+    (value["authorization"] === undefined || auth.includes(value["authorization"] as string)) &&
+    (value["token"] === undefined || tokenModes.includes(value["token"] as FakeTokenMode)) &&
+    (value["refresh"] === undefined ||
+      refreshModes.includes(value["refresh"] as FakeRefreshMode)) &&
+    (value["calendar"] === undefined ||
+      calendarModes.includes(value["calendar"] as FakeCalendarMode)) &&
+    (value["calendarEnabled"] === undefined || typeof value["calendarEnabled"] === "boolean") &&
+    (value["subject"] === undefined ||
+      (typeof value["subject"] === "string" && bounded(value["subject"], 255))) &&
+    (value["email"] === undefined ||
+      (typeof value["email"] === "string" && bounded(value["email"], 320))) &&
+    (value["calendarPages"] === undefined || validPages(value["calendarPages"], false)) &&
+    (value["eventPages"] === undefined || validPages(value["eventPages"], true))
   );
 }
 
@@ -443,7 +878,14 @@ async function control(request: Request, url: URL): Promise<Response> {
   if (url.pathname === "/configure" && request.method === "POST") {
     let value: unknown;
     try {
-      value = await request.json();
+      if (request.headers.get("content-type")?.trim().toLowerCase() !== "application/json")
+        throw new TypeError();
+      const declared = request.headers.get("content-length");
+      if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > MAX_CONTROL_BYTES))
+        throw new TypeError();
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      if (bytes.byteLength > MAX_CONTROL_BYTES) throw new TypeError();
+      value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
     } catch {
       return json({ error: "invalid_control_request" }, 400);
     }

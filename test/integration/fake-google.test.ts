@@ -12,6 +12,7 @@ import {
   googleTestConfiguration,
   listGoogleCalendarsPage,
   listGoogleEventsPage,
+  refreshGoogleToken,
   revokeGoogleTokenBestEffort,
 } from "../../src/provider/google";
 import {
@@ -23,8 +24,10 @@ import {
   FAKE_GOOGLE_REDIRECT_URI,
 } from "../support/fake-google";
 import type {
+  FakeCalendarMode,
   FakeGoogleConfiguration,
   FakeGoogleStats,
+  FakeRefreshMode,
   FakeTokenMode,
 } from "../support/fake-google";
 
@@ -435,7 +438,7 @@ describe("isolated workerd fake Google", () => {
         fetch: outboundFetch,
       }),
     ).resolves.toMatchObject({ ok: false, error: { code: "rate_limited", retryAfterSeconds: 3 } });
-    await configure({ calendar: "malformed" });
+    await configure({ calendar: "malformed_shape" });
     await expect(
       listGoogleCalendarsPage({
         configuration: provider,
@@ -444,6 +447,375 @@ describe("isolated workerd fake Google", () => {
       }),
     ).resolves.toMatchObject({ ok: false, error: { code: "invalid_response" } });
     expect(await statistics()).toMatchObject({ revokeCalls: 1, calendarCalls: 4 });
+  });
+
+  it("strictly refreshes, rotates, omits optional fields, and atomically rejects rotated-token concurrency", async () => {
+    const grant = await authorize(true);
+    const issued = await (await exchange(grant.code)).json<Record<string, unknown>>();
+    const refreshToken = String(issued["refresh_token"]);
+    const provider = googleTestConfiguration({
+      tokenEndpoint: `${FAKE_GOOGLE_ORIGIN}/token`,
+      revocationEndpoint: `${FAKE_GOOGLE_ORIGIN}/revoke`,
+      calendarApiOrigin: FAKE_GOOGLE_ORIGIN,
+    });
+    const refresh = (token: string, timeoutMs = 1_000) =>
+      refreshGoogleToken({
+        configuration: provider,
+        clientId: FAKE_GOOGLE_CLIENT_ID,
+        clientSecret: FAKE_GOOGLE_CLIENT_SECRET,
+        refreshToken: token,
+        fetch: outboundFetch,
+        timeoutMs,
+      });
+
+    await expect(refresh(refreshToken)).resolves.toMatchObject({
+      ok: true,
+      value: { expiresInSeconds: 3_600, scope: grant.scopes, refreshToken },
+    });
+    await configure({ refresh: "omit_refresh" });
+    const omittedRefresh = await refresh(refreshToken);
+    expect(omittedRefresh).toMatchObject({ ok: true, value: { scope: grant.scopes } });
+    if (omittedRefresh.ok) expect(omittedRefresh.value).not.toHaveProperty("refreshToken");
+    await configure({ refresh: "omit_scope" });
+    const omittedScope = await refresh(refreshToken);
+    expect(omittedScope).toMatchObject({ ok: true, value: { refreshToken } });
+    if (omittedScope.ok) expect(omittedScope.value).not.toHaveProperty("scope");
+
+    await configure({ refresh: "rotate" });
+    const rotated = await refresh(refreshToken);
+    expect(rotated.ok).toBe(true);
+    if (!rotated.ok || rotated.value.refreshToken === undefined) throw new Error("rotation failed");
+    expect(rotated.value.refreshToken).not.toBe(refreshToken);
+    await expect(refresh(refreshToken)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "reauthorization_required" },
+    });
+
+    await configure({ refresh: "rotate" });
+    const concurrent = await Promise.all(
+      Array.from({ length: 12 }, () => refresh(rotated.value.refreshToken ?? "missing")),
+    );
+    expect(concurrent.filter((result) => result.ok)).toHaveLength(1);
+    expect(concurrent.filter((result) => !result.ok)).toHaveLength(11);
+    expect(await statistics()).toMatchObject({ refreshRequests: 17, successfulRefreshes: 5 });
+  });
+
+  it("enforces the exact refresh form and models refresh scope and failure responses", async () => {
+    const grant = await authorize(true);
+    const issued = await (await exchange(grant.code)).json<Record<string, unknown>>();
+    const refreshToken = String(issued["refresh_token"]);
+    const body = () =>
+      new URLSearchParams({
+        client_id: FAKE_GOOGLE_CLIENT_ID,
+        client_secret: FAKE_GOOGLE_CLIENT_SECRET,
+        refresh_token: refreshToken,
+        grant_type: "refresh_token",
+      });
+    const direct = (form: URLSearchParams) =>
+      fetch(`${FAKE_GOOGLE_ORIGIN}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: form,
+        redirect: "manual",
+      });
+    const extra = body();
+    extra.set("scope", FAKE_CALENDAR_SCOPE);
+    expect((await direct(extra)).status).toBe(400);
+    const duplicate = body();
+    duplicate.append("refresh_token", refreshToken);
+    expect((await direct(duplicate)).status).toBe(400);
+    const wrongSecret = body();
+    wrongSecret.set("client_secret", "wrong-fake-secret");
+    expect((await direct(wrongSecret)).status).toBe(400);
+
+    for (const [mode, status] of [
+      ["invalid_grant", 400],
+      ["rate_limited", 429],
+      ["server_error", 500],
+    ] as const satisfies readonly (readonly [FakeRefreshMode, number])[]) {
+      await configure({ refresh: mode });
+      expect((await direct(body())).status).toBe(status);
+    }
+    for (const mode of ["writable_scope", "unknown_scope"] as const) {
+      await configure({ refresh: mode });
+      const value = await (await direct(body())).json<Record<string, unknown>>();
+      expect(value["scope"]).toContain(
+        mode === "writable_scope" ? "/auth/calendar" : "fake.unknown.scope",
+      );
+    }
+    for (const mode of [
+      "malformed_json",
+      "malformed_shape",
+      "oversized_declared",
+      "oversized_streamed",
+    ] as const) {
+      await configure({ refresh: mode });
+      const provider = googleTestConfiguration({
+        tokenEndpoint: `${FAKE_GOOGLE_ORIGIN}/token`,
+        revocationEndpoint: `${FAKE_GOOGLE_ORIGIN}/revoke`,
+        calendarApiOrigin: FAKE_GOOGLE_ORIGIN,
+      });
+      await expect(
+        refreshGoogleToken({
+          configuration: provider,
+          clientId: FAKE_GOOGLE_CLIENT_ID,
+          clientSecret: FAKE_GOOGLE_CLIENT_SECRET,
+          refreshToken,
+          fetch: outboundFetch,
+        }),
+      ).resolves.toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    }
+    await configure({ refresh: "stall" });
+    const provider = googleTestConfiguration({
+      tokenEndpoint: `${FAKE_GOOGLE_ORIGIN}/token`,
+      revocationEndpoint: `${FAKE_GOOGLE_ORIGIN}/revoke`,
+      calendarApiOrigin: FAKE_GOOGLE_ORIGIN,
+    });
+    await expect(
+      refreshGoogleToken({
+        configuration: provider,
+        clientId: FAKE_GOOGLE_CLIENT_ID,
+        clientSecret: FAKE_GOOGLE_CLIENT_SECRET,
+        refreshToken,
+        fetch: outboundFetch,
+        timeoutMs: 25,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "timeout" } });
+  });
+
+  it("validates exact Calendar projections and paginates mutable complete calendar fixtures", async () => {
+    await configure({
+      calendarEnabled: true,
+      calendarPages: [
+        {
+          items: [
+            {
+              id: "provider-calendar-one",
+              summary: "Primary",
+              description: "Complete fixture",
+              timeZone: "Europe/London",
+              accessRole: "owner",
+              primary: true,
+              selected: true,
+            },
+          ],
+          nextPageToken: "p".repeat(1_024),
+        },
+        {
+          items: [
+            {
+              id: "provider-calendar-two",
+              summary: "Shared",
+              accessRole: "reader",
+              selected: false,
+            },
+          ],
+        },
+      ],
+    });
+    const provider = googleTestConfiguration({
+      tokenEndpoint: `${FAKE_GOOGLE_ORIGIN}/token`,
+      revocationEndpoint: `${FAKE_GOOGLE_ORIGIN}/revoke`,
+      calendarApiOrigin: FAKE_GOOGLE_ORIGIN,
+    });
+    const first = await listGoogleCalendarsPage({
+      configuration: provider,
+      accessToken: "fake-access",
+      fetch: outboundFetch,
+    });
+    expect(first).toMatchObject({
+      ok: true,
+      value: {
+        items: [{ id: "provider-calendar-one", timeZone: "Europe/London", access: "owner" }],
+      },
+    });
+    if (!first.ok || first.value.nextPageToken === undefined) throw new Error("missing next page");
+    await expect(
+      listGoogleCalendarsPage({
+        configuration: provider,
+        accessToken: "fake-access",
+        pageToken: first.value.nextPageToken,
+        fetch: outboundFetch,
+      }),
+    ).resolves.toMatchObject({ ok: true, value: { items: [{ id: "provider-calendar-two" }] } });
+
+    const exact = new URL(`${FAKE_GOOGLE_ORIGIN}/calendar/v3/users/me/calendarList`);
+    exact.searchParams.set("maxResults", "251");
+    exact.searchParams.set("fields", "*");
+    const rejected = await fake.fetch(exact, {
+      headers: { authorization: "Bearer fake-access", accept: "application/json" },
+    });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.text()).not.toContain("provider-calendar-one");
+    expect((await fake.fetch(exact, { method: "POST" })).status).toBe(405);
+
+    await configure({
+      calendarPages: [
+        { items: [{ id: "replacement-calendar", summary: "Replacement", accessRole: "writer" }] },
+      ],
+    });
+    await expect(
+      listGoogleCalendarsPage({
+        configuration: provider,
+        accessToken: "fake-access",
+        fetch: outboundFetch,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ id: "replacement-calendar", access: "writer" }] },
+    });
+    await configure({ calendarPages: [{ items: [], nextPageToken: "x".repeat(1_025) }] });
+    await expect(
+      listGoogleCalendarsPage({
+        configuration: provider,
+        accessToken: "fake-access",
+        fetch: outboundFetch,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    await configure({ calendarPages: [{ items: [], nextPageToken: "bad\ncontrol" }] });
+    await expect(
+      listGoogleCalendarsPage({
+        configuration: provider,
+        accessToken: "fake-access",
+        fetch: outboundFetch,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalid_response" } });
+  });
+
+  it("serves exact event pages with timed, all-day, recurrence, cancellation, and mutations", async () => {
+    await configure({
+      calendarEnabled: true,
+      eventPages: [
+        {
+          calendarId: "calendar/id @ test",
+          nextPageToken: "events-next",
+          items: [
+            {
+              id: "timed-provider-id",
+              status: "confirmed",
+              updated: "2026-03-01T10:00:00Z",
+              summary: "Timed",
+              start: { dateTime: "2026-03-02T10:00:00Z" },
+              end: { dateTime: "2026-03-02T11:00:00Z" },
+            },
+            {
+              id: "all-day-provider-id",
+              status: "confirmed",
+              updated: "2026-03-01T10:00:00Z",
+              start: { date: "2026-03-03" },
+              end: { date: "2026-03-05" },
+            },
+            {
+              id: "instance-provider-id",
+              status: "tentative",
+              updated: "2026-03-01T10:00:00Z",
+              start: { dateTime: "2026-03-06T10:00:00Z" },
+              end: { dateTime: "2026-03-06T11:00:00Z" },
+              recurringEventId: "series-provider-id",
+              originalStartTime: { dateTime: "2026-03-06T10:00:00Z" },
+            },
+          ],
+        },
+        {
+          calendarId: "calendar/id @ test",
+          items: [
+            { id: "deleted-provider-id", status: "cancelled", updated: "2026-03-07T10:00:00Z" },
+          ],
+        },
+      ],
+    });
+    const provider = googleTestConfiguration({
+      tokenEndpoint: `${FAKE_GOOGLE_ORIGIN}/token`,
+      revocationEndpoint: `${FAKE_GOOGLE_ORIGIN}/revoke`,
+      calendarApiOrigin: FAKE_GOOGLE_ORIGIN,
+    });
+    const request = {
+      configuration: provider,
+      accessToken: "fake-access",
+      calendarId: "calendar/id @ test",
+      timeMin: "2026-03-01T00:00:00Z",
+      timeMax: "2026-04-01T00:00:00Z",
+      fetch: outboundFetch,
+    } as const;
+    const first = await listGoogleEventsPage(request);
+    expect(first).toMatchObject({
+      ok: true,
+      value: {
+        items: [
+          { id: "timed-provider-id" },
+          { id: "all-day-provider-id", end: { kind: "all_day", date: "2026-03-05" } },
+          { recurrence: { seriesId: "series-provider-id" } },
+        ],
+      },
+    });
+    if (!first.ok || first.value.nextPageToken === undefined)
+      throw new Error("missing events page");
+    await expect(
+      listGoogleEventsPage({ ...request, pageToken: first.value.nextPageToken }),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ id: "deleted-provider-id", status: "cancelled" }] },
+    });
+    await configure({
+      eventPages: [
+        {
+          calendarId: "calendar/id @ test",
+          items: [
+            {
+              id: "changed-provider-id",
+              status: "confirmed",
+              updated: "2026-03-08T10:00:00Z",
+              start: { dateTime: "2026-03-09T10:00:00Z" },
+              end: { dateTime: "2026-03-09T11:00:00Z" },
+            },
+          ],
+        },
+      ],
+    });
+    await expect(listGoogleEventsPage(request)).resolves.toMatchObject({
+      ok: true,
+      value: { items: [{ id: "changed-provider-id" }] },
+    });
+  });
+
+  it("classifies Calendar HTTP, malformed, size, and stalled-body faults", async () => {
+    await configure({ calendarEnabled: true });
+    const provider = googleTestConfiguration({
+      tokenEndpoint: `${FAKE_GOOGLE_ORIGIN}/token`,
+      revocationEndpoint: `${FAKE_GOOGLE_ORIGIN}/revoke`,
+      calendarApiOrigin: FAKE_GOOGLE_ORIGIN,
+    });
+    const expected: readonly (readonly [FakeCalendarMode, string])[] = [
+      ["unauthorized", "unauthorized"],
+      ["permission_denied", "permission_denied"],
+      ["quota_exceeded", "rate_limited"],
+      ["rate_limited", "rate_limited"],
+      ["not_found", "not_found"],
+      ["server_error", "unavailable"],
+      ["malformed_json", "invalid_response"],
+      ["malformed_shape", "invalid_response"],
+      ["oversized_declared", "invalid_response"],
+      ["oversized_streamed", "invalid_response"],
+    ];
+    for (const [mode, code] of expected) {
+      await configure({ calendar: mode });
+      await expect(
+        listGoogleCalendarsPage({
+          configuration: provider,
+          accessToken: "fake-access",
+          fetch: outboundFetch,
+        }),
+      ).resolves.toMatchObject({ ok: false, error: { code } });
+    }
+    await configure({ calendar: "stall" });
+    await expect(
+      listGoogleCalendarsPage({
+        configuration: provider,
+        accessToken: "fake-access",
+        fetch: outboundFetch,
+        timeoutMs: 25,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "timeout" } });
   });
 
   it("never exposes keys, codes, tokens, identity values, or hostile input in control output", async () => {
@@ -467,8 +839,12 @@ describe("isolated workerd fake Google", () => {
     expect(Object.keys(JSON.parse(statsText) as object).sort()).toEqual([
       "authorizationRequests",
       "calendarCalls",
+      "calendarListCalls",
+      "eventCalls",
+      "refreshRequests",
       "rejectedRequests",
       "revokeCalls",
+      "successfulRefreshes",
       "tokenRequests",
       "uniqueCodeExchanges",
     ]);
