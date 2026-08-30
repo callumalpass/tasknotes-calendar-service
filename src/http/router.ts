@@ -1,10 +1,28 @@
-import { MAX_JSON_BODY_BYTES, routes, type RouteDefinition, type RouteName } from "../contracts";
+import {
+  MAX_JSON_BODY_BYTES,
+  ServiceCredentialSchema,
+  routes,
+  type RouteDefinition,
+  type RouteName,
+} from "../contracts";
 import { ContractError, errorResponse, jsonResponse, noContentResponse } from "./responses";
+
+export interface AuthenticatedRouteContext {
+  readonly principalId: string;
+  readonly sessionId: string;
+}
 
 export interface RouteInput {
   readonly params: Readonly<Record<string, string>>;
   readonly query: unknown;
   readonly body?: unknown;
+  readonly authenticated?: AuthenticatedRouteContext;
+}
+
+export interface RouterAuthentication {
+  authenticate(
+    credential: string,
+  ): Promise<{ readonly principalId: string; readonly session: { readonly id: string } } | null>;
 }
 
 export type RouteHandler = (input: RouteInput, request: Request) => Promise<unknown>;
@@ -15,6 +33,8 @@ class InvalidInputError extends Error {
     super(code);
   }
 }
+
+class AuthenticationRequiredError extends Error {}
 
 interface CompiledRoute {
   readonly definition: RouteDefinition;
@@ -39,6 +59,29 @@ function compileRoute(definition: RouteDefinition): CompiledRoute {
 }
 
 const compiledRoutes = routes.map(compileRoute);
+
+function parseBearerCredential(request: Request): string | null {
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith("Bearer ")) return null;
+  const result = ServiceCredentialSchema.safeParse(authorization.slice("Bearer ".length));
+  return result.success ? result.data : null;
+}
+
+async function authenticate(
+  request: Request,
+  authentication: RouterAuthentication,
+): Promise<AuthenticatedRouteContext> {
+  const credential = parseBearerCredential(request);
+  if (credential === null) throw new AuthenticationRequiredError();
+  let result;
+  try {
+    result = await authentication.authenticate(credential);
+  } catch {
+    throw new Error("Authentication dependency failed");
+  }
+  if (result === null) throw new AuthenticationRequiredError();
+  return Object.freeze({ principalId: result.principalId, sessionId: result.session.id });
+}
 
 function parseQuery(url: URL): Record<string, string> {
   const parsed: Record<string, string> = {};
@@ -129,7 +172,11 @@ async function dispatch(
   match: RegExpExecArray,
   request: Request,
   handlers: RouteHandlers,
+  authentication: RouterAuthentication,
 ): Promise<Response> {
+  const authenticated = route.definition.authenticated
+    ? await authenticate(request, authentication)
+    : undefined;
   const url = new URL(request.url);
   const queryResult = route.definition.query.safeParse(parseQuery(url));
   if (!queryResult.success) throw new InvalidInputError("invalid_request");
@@ -144,10 +191,12 @@ async function dispatch(
     throw new InvalidInputError("invalid_request");
   }
 
-  const input: RouteInput =
-    route.definition.body === undefined
-      ? { params, query: queryResult.data }
-      : { params, query: queryResult.data, body };
+  const input: RouteInput = Object.freeze({
+    params,
+    query: queryResult.data,
+    ...(route.definition.body === undefined ? {} : { body }),
+    ...(authenticated === undefined ? {} : { authenticated }),
+  });
   const output = await handlers[route.definition.name](input, request);
 
   if (route.definition.response === undefined) {
@@ -159,7 +208,10 @@ async function dispatch(
   return jsonResponse(responseResult.data, route.definition.successStatus);
 }
 
-export function createRouter(handlers: RouteHandlers): (request: Request) => Promise<Response> {
+export function createRouter(
+  handlers: RouteHandlers,
+  authentication: RouterAuthentication,
+): (request: Request) => Promise<Response> {
   return async (request) => {
     const url = new URL(request.url);
     for (const route of compiledRoutes) {
@@ -167,8 +219,11 @@ export function createRouter(handlers: RouteHandlers): (request: Request) => Pro
       const match = route.expression.exec(url.pathname);
       if (match === null) continue;
       try {
-        return await dispatch(route, match, request, handlers);
+        return await dispatch(route, match, request, handlers, authentication);
       } catch (error) {
+        if (error instanceof AuthenticationRequiredError) {
+          return errorResponse("authentication_required");
+        }
         if (error instanceof InvalidInputError) return errorResponse(error.code);
         if (error instanceof ContractError) {
           return errorResponse(error.code, error.retryAfterSeconds);
