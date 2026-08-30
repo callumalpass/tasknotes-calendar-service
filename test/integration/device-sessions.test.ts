@@ -37,26 +37,26 @@ interface StoredSession {
   principal_id: string;
   credential_hash: string;
   device_name: string;
-  last_used_at: string;
-  idle_expires_at: string;
-  absolute_expires_at: string;
-  revoked_at: string | null;
+  last_used_at: number;
+  idle_expires_at: number;
+  absolute_expires_at: number;
+  revoked_at: number | null;
 }
 
 let clock: MutableClock;
 let sessions: DeviceSessions;
 
-async function addPrincipal(id: string, state: "active" | "deleting" = "active"): Promise<void> {
-  const timestamp = new Date(START).toISOString();
+async function addPrincipal(id: string): Promise<void> {
+  const timestamp = Math.floor(START / 1_000);
   await testEnv.DB.prepare(
-    "INSERT INTO principals (id, state, generation, created_at, last_active_at) VALUES (?, ?, 1, ?, ?)",
+    "INSERT INTO principals (id, created_at, last_active_at) VALUES (?, ?, ?)",
   )
-    .bind(id, state, timestamp, timestamp)
+    .bind(id, timestamp, timestamp)
     .run();
 }
 
 async function addGoogleIdentity(id: string, principalId: string, subject: string): Promise<void> {
-  const timestamp = new Date(START).toISOString();
+  const timestamp = Math.floor(START / 1_000);
   await testEnv.DB.prepare(
     `INSERT INTO external_identities
       (id, principal_id, provider, issuer, subject, email, display_name, email_verified, created_at, updated_at)
@@ -114,9 +114,9 @@ describe("device sessions against migrated D1", () => {
     expect(stored).toMatchObject({
       principal_id: "principal-a",
       device_name: "Callum's phone",
-      last_used_at: "2026-01-01T00:00:00.000Z",
-      idle_expires_at: "2026-01-31T00:00:00.000Z",
-      absolute_expires_at: "2026-04-01T00:00:00.000Z",
+      last_used_at: START / 1_000,
+      idle_expires_at: (START + 30 * DAY) / 1_000,
+      absolute_expires_at: (START + 90 * DAY) / 1_000,
       revoked_at: null,
     });
 
@@ -251,21 +251,21 @@ describe("device sessions against migrated D1", () => {
 
     clock.milliseconds = START + 60 * 60 * 1_000 - 1;
     await sessions.authenticate(created.credential);
-    expect((await storedSession(created.id)).last_used_at).toBe("2026-01-01T00:00:00.000Z");
+    expect((await storedSession(created.id)).last_used_at).toBe(START / 1_000);
 
     clock.milliseconds += 1;
     await sessions.authenticate(created.credential);
     let stored = await storedSession(created.id);
-    expect(stored.last_used_at).toBe("2026-01-01T01:00:00.000Z");
-    expect(stored.idle_expires_at).toBe("2026-01-31T01:00:00.000Z");
+    expect(stored.last_used_at).toBe((START + 60 * 60 * 1_000) / 1_000);
+    expect(stored.idle_expires_at).toBe((START + 30 * DAY + 60 * 60 * 1_000) / 1_000);
 
     clock.milliseconds = START + 70 * DAY;
     await testEnv.DB.prepare("UPDATE device_sessions SET idle_expires_at = ? WHERE id = ?")
-      .bind(new Date(START + 89 * DAY).toISOString(), created.id)
+      .bind((START + 89 * DAY) / 1_000, created.id)
       .run();
     await sessions.authenticate(created.credential);
     stored = await storedSession(created.id);
-    expect(stored.last_used_at).toBe("2026-03-12T00:00:00.000Z");
+    expect(stored.last_used_at).toBe((START + 70 * DAY) / 1_000);
     expect(stored.idle_expires_at).toBe(stored.absolute_expires_at);
   });
 
@@ -280,13 +280,12 @@ describe("device sessions against migrated D1", () => {
     clock.milliseconds += 1234;
     await expect(sessions.revoke("principal-a", created.id)).resolves.toBe(true);
     await expect(sessions.revoke("principal-a", created.id)).resolves.toBe(false);
-    expect((await storedSession(created.id)).revoked_at).toBe("2026-01-01T00:00:01.234Z");
+    expect((await storedSession(created.id)).revoked_at).toBe(Math.floor((START + 1234) / 1_000));
     await expect(sessions.authenticate(created.credential)).resolves.toBeNull();
   });
 
-  it("requires an active principal for creation and authentication", async () => {
+  it("requires an existing principal and deletion immediately removes session authority", async () => {
     await addPrincipal("principal-a");
-    await addPrincipal("principal-deleting", "deleting");
     const created = await sessions.create({
       principalId: "principal-a",
       deviceName: "Browser",
@@ -295,14 +294,12 @@ describe("device sessions against migrated D1", () => {
 
     await expect(
       sessions.create({
-        principalId: "principal-deleting",
+        principalId: "missing-principal",
         deviceName: "Browser",
         clientKind: "web",
       }),
     ).rejects.toBeInstanceOf(PrincipalUnavailableError);
-    await testEnv.DB.prepare(
-      "UPDATE principals SET state = 'deleting' WHERE id = 'principal-a'",
-    ).run();
+    await testEnv.DB.prepare("DELETE FROM principals WHERE id = 'principal-a'").run();
     await expect(sessions.authenticate(created.credential)).resolves.toBeNull();
     await expect(sessions.list("principal-a")).resolves.toEqual([]);
   });

@@ -7,9 +7,9 @@ const CREDENTIAL_VERSION = "v1";
 const SESSION_ID_BYTES = 16;
 const CREDENTIAL_SECRET_BYTES = 32;
 const DIGEST_BYTES = 32;
-const IDLE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1_000;
-const ABSOLUTE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1_000;
-const LAST_USED_UPDATE_INTERVAL_MS = 60 * 60 * 1_000;
+const IDLE_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
+const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
+const LAST_USED_UPDATE_INTERVAL_SECONDS = 60 * 60;
 const MAX_DEVICE_NAME_BYTES = 128;
 const MAX_PRINCIPAL_ID_BYTES = 256;
 const CLIENT_KINDS = ["web", "ios", "android", "obsidian"] as const;
@@ -60,22 +60,22 @@ interface SessionRow {
   credential_hash: string;
   device_name: string;
   client_kind: string;
-  created_at: string;
-  last_used_at: string;
-  idle_expires_at: string;
-  absolute_expires_at: string;
-  revoked_at: string | null;
+  created_at: number;
+  last_used_at: number;
+  idle_expires_at: number;
+  absolute_expires_at: number;
+  revoked_at: number | null;
 }
 
 interface MetadataRow {
   id: string;
   device_name: string;
   client_kind: string;
-  created_at: string;
-  last_used_at: string;
-  idle_expires_at: string;
-  absolute_expires_at: string;
-  revoked_at: string | null;
+  created_at: number;
+  last_used_at: number;
+  idle_expires_at: number;
+  absolute_expires_at: number;
+  revoked_at: number | null;
 }
 
 export class DeviceSessionInputError extends Error {
@@ -96,12 +96,19 @@ function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return Uint8Array.from(bytes).buffer;
 }
 
-function validatedNow(clock: Clock): Date {
+function validatedNow(clock: Clock): number {
   const now = clock.now();
-  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime()) || now.getTime() < 0) {
     throw new TypeError("clock returned an invalid date");
   }
-  return new Date(now.getTime());
+  return Math.floor(now.getTime() / 1_000);
+}
+
+function toIso(epochSeconds: number): string {
+  if (!Number.isSafeInteger(epochSeconds) || epochSeconds < 0) {
+    throw new Error("stored device session has an invalid timestamp");
+  }
+  return new Date(epochSeconds * 1_000).toISOString();
 }
 
 function isBoundedIdentifier(value: string, maximumBytes: number): boolean {
@@ -203,17 +210,12 @@ function metadata(row: MetadataRow | SessionRow): DeviceSessionMetadata {
     id: row.id,
     deviceName: row.device_name,
     clientKind: row.client_kind,
-    createdAt: row.created_at,
-    lastUsedAt: row.last_used_at,
-    idleExpiresAt: row.idle_expires_at,
-    absoluteExpiresAt: row.absolute_expires_at,
-    revokedAt: row.revoked_at,
+    createdAt: toIso(row.created_at),
+    lastUsedAt: toIso(row.last_used_at),
+    idleExpiresAt: toIso(row.idle_expires_at),
+    absoluteExpiresAt: toIso(row.absolute_expires_at),
+    revokedAt: row.revoked_at === null ? null : toIso(row.revoked_at),
   };
-}
-
-function validStoredInstant(value: string): number | null {
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? milliseconds : null;
 }
 
 export class DeviceSessions {
@@ -238,9 +240,9 @@ export class DeviceSessions {
     const id = encodeBase64Url(sessionIdBytes);
     const credential = `${CREDENTIAL_VERSION}.${id}.${encodeBase64Url(secret)}`;
     const digest = encodeBase64Url(await credentialDigest(this.#pepper, sessionIdBytes, secret));
-    const createdAt = now.toISOString();
-    const idleExpiresAt = new Date(now.getTime() + IDLE_LIFETIME_MS).toISOString();
-    const absoluteExpiresAt = new Date(now.getTime() + ABSOLUTE_LIFETIME_MS).toISOString();
+    const createdAt = now;
+    const idleExpiresAt = now + IDLE_LIFETIME_SECONDS;
+    const absoluteExpiresAt = now + ABSOLUTE_LIFETIME_SECONDS;
 
     const result = await this.#db
       .prepare(
@@ -250,7 +252,7 @@ export class DeviceSessions {
         )
         SELECT ?, id, ?, ?, ?, ?, ?, ?, ?, NULL
         FROM principals
-        WHERE id = ? AND state = 'active'`,
+        WHERE id = ?`,
       )
       .bind(
         id,
@@ -273,10 +275,10 @@ export class DeviceSessions {
       credential,
       deviceName: input.deviceName,
       clientKind: input.clientKind,
-      createdAt,
-      lastUsedAt: createdAt,
-      idleExpiresAt,
-      absoluteExpiresAt,
+      createdAt: toIso(createdAt),
+      lastUsedAt: toIso(createdAt),
+      idleExpiresAt: toIso(idleExpiresAt),
+      absoluteExpiresAt: toIso(absoluteExpiresAt),
       revokedAt: null,
     };
   }
@@ -297,7 +299,7 @@ export class DeviceSessions {
         `SELECT s.id, s.principal_id, s.credential_hash, s.device_name, s.client_kind,
                 s.created_at, s.last_used_at, s.idle_expires_at, s.absolute_expires_at, s.revoked_at
          FROM device_sessions s
-         JOIN principals p ON p.id = s.principal_id AND p.state = 'active'
+         JOIN principals p ON p.id = s.principal_id
          WHERE s.id = ?
          LIMIT 1`,
       )
@@ -321,27 +323,14 @@ export class DeviceSessions {
     }
 
     const now = validatedNow(this.#clock);
-    const nowMs = now.getTime();
-    const lastUsedMs = validStoredInstant(row.last_used_at);
-    const idleExpiresMs = validStoredInstant(row.idle_expires_at);
-    const absoluteExpiresMs = validStoredInstant(row.absolute_expires_at);
-    if (
-      row.revoked_at !== null ||
-      lastUsedMs === null ||
-      idleExpiresMs === null ||
-      absoluteExpiresMs === null ||
-      nowMs >= idleExpiresMs ||
-      nowMs >= absoluteExpiresMs
-    ) {
+    if (row.revoked_at !== null || now >= row.idle_expires_at || now >= row.absolute_expires_at) {
       return null;
     }
 
     let authenticatedRow = row;
-    if (nowMs - lastUsedMs >= LAST_USED_UPDATE_INTERVAL_MS) {
-      const lastUsedAt = now.toISOString();
-      const idleExpiresAt = new Date(
-        Math.min(nowMs + IDLE_LIFETIME_MS, absoluteExpiresMs),
-      ).toISOString();
+    if (now - row.last_used_at >= LAST_USED_UPDATE_INTERVAL_SECONDS) {
+      const lastUsedAt = now;
+      const idleExpiresAt = Math.min(now + IDLE_LIFETIME_SECONDS, row.absolute_expires_at);
       const update = await this.#db
         .prepare(
           `UPDATE device_sessions
@@ -351,7 +340,7 @@ export class DeviceSessions {
              AND last_used_at <= ?
              AND EXISTS (
                SELECT 1 FROM principals p
-               WHERE p.id = device_sessions.principal_id AND p.state = 'active'
+               WHERE p.id = device_sessions.principal_id
              )`,
         )
         .bind(
@@ -361,7 +350,7 @@ export class DeviceSessions {
           row.principal_id,
           lastUsedAt,
           lastUsedAt,
-          new Date(nowMs - LAST_USED_UPDATE_INTERVAL_MS).toISOString(),
+          now - LAST_USED_UPDATE_INTERVAL_SECONDS,
         )
         .run();
       if (update.meta.changes !== 1) {
@@ -380,7 +369,7 @@ export class DeviceSessions {
         `SELECT s.id, s.device_name, s.client_kind, s.created_at, s.last_used_at,
                 s.idle_expires_at, s.absolute_expires_at, s.revoked_at
          FROM device_sessions s
-         JOIN principals p ON p.id = s.principal_id AND p.state = 'active'
+         JOIN principals p ON p.id = s.principal_id
          WHERE s.principal_id = ?
          ORDER BY s.created_at DESC, s.id DESC`,
       )
@@ -394,7 +383,7 @@ export class DeviceSessions {
     if (!isBoundedIdentifier(sessionId, 64)) {
       return false;
     }
-    const revokedAt = validatedNow(this.#clock).toISOString();
+    const revokedAt = validatedNow(this.#clock);
     const result = await this.#db
       .prepare(
         `UPDATE device_sessions
@@ -402,7 +391,7 @@ export class DeviceSessions {
          WHERE id = ? AND principal_id = ? AND revoked_at IS NULL
            AND EXISTS (
              SELECT 1 FROM principals p
-             WHERE p.id = device_sessions.principal_id AND p.state = 'active'
+             WHERE p.id = device_sessions.principal_id
            )`,
       )
       .bind(revokedAt, sessionId, principalId)
