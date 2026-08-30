@@ -1,0 +1,44 @@
+{
+  "name": "tasknotes-calendar-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.15.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "test:integration": "vitest run test/integration",
+    "test:security": "vitest run test/security",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "vitest run test/e2e",
+    "migrations:local": "wrangler d1 migrations apply tasknotes-calendar-local --local",
+    "deploy:dry-run": "wrangler deploy --dry-run --outdir dist/worker",
+    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test:coverage && pnpm deploy:dry-run"
+  },
+  "dependencies": {
+    "jose": "6.1.0",
+    "zod": "4.5.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@cloudflare/workers-types": "5.20260830.1",
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.3.0",
+    "@vitest/coverage-v8": "4.1.11",
+    "eslint": "10.7.0",
+    "globals": "17.7.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.11",
+    "wrangler": "4.127.1"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tasknotes-calendar-local",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "workers_dev": true,
+  "observability": {
+    "enabled": false,
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tasknotes-calendar-local",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "vars": {
+    "ENVIRONMENT": "local",
+    "PUBLIC_ORIGIN": "http://127.0.0.1:8787",
+    "GOOGLE_CLIENT_ID": "local-fake-google-client",
+    "GOOGLE_AUTHORIZATION_ENDPOINT": "http://127.0.0.1:9797/authorize",
+    "GOOGLE_TOKEN_ENDPOINT": "http://127.0.0.1:9797/token",
+    "GOOGLE_JWKS_URI": "http://127.0.0.1:9797/jwks",
+    "GOOGLE_ISSUER": "http://127.0.0.1:9797",
+    "GOOGLE_CALENDAR_API_ORIGIN": "http://127.0.0.1:9797/calendar/v3",
+  },
+}
