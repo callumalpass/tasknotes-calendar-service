@@ -284,6 +284,10 @@ describe("Google code exchange and ID token verification", () => {
     ["stale issued-at", { iat: NOW - 3_662 }],
     ["future not-before", { nbf: NOW + 61 }],
     ["empty subject", { sub: "" }],
+    ["oversized ASCII subject", { sub: "x".repeat(256) }],
+    ["oversized UTF-8 subject", { sub: "é".repeat(128) }],
+    ["C0 control in subject", { sub: "line\nbreak" }],
+    ["DEL control in subject", { sub: "delete\u007fcontrol" }],
   ])("rejects %s", async (_label, override) => {
     const response = jsonResponse(
       await tokenPayload({ id_token: await signedToken(claims(override)) }),
@@ -427,6 +431,23 @@ describe("calendar connection exchange", () => {
       scopes: ["openid", "email", "profile", CALENDAR_SCOPE],
     });
   });
+
+  it.each(["", "x".repeat(256), "é".repeat(128), "line\nbreak", "delete\u007fcontrol"])(
+    "rejects an invalid expected subject before provider exchange: %s",
+    async (expectedSubject) => {
+      const deps = dependencies(jsonResponse(await calendarTokenPayload()));
+      await expectCode(
+        exchangeGoogleCalendarCode(
+          endpoints,
+          client,
+          { ...exchangeInput, expectedSubject, requiredCalendarScopes: [CALENDAR_SCOPE] },
+          deps,
+        ),
+        "invalid_request",
+      );
+      expect(deps.fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects a different immutable subject", async () => {
     await expectCode(

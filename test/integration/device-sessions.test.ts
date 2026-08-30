@@ -75,15 +75,16 @@ async function addAuthorizedSignIn(
   overrides: { pollingDigest?: string; challenge?: string; expiresAt?: number } = {},
 ): Promise<void> {
   const now = START / 1_000;
+  const expiresAt = overrides.expiresAt ?? now + 600;
+  const completedAt = Math.min(now, expiresAt - 1);
   await testEnv.DB.prepare(
     `INSERT INTO oauth_transactions
       (id, intent, status, state_hash, nonce_hash, polling_secret_hash,
-       tasknotes_pkce_challenge, provider_pkce_schema_version, provider_pkce_key_version,
-       provider_pkce_dek_iv, provider_pkce_wrapped_dek, provider_pkce_payload_iv,
-       provider_pkce_ciphertext, authorized_principal_id, authorized_identity_id,
-       device_name, client_kind, created_at, expires_at, callback_completed_at)
-     VALUES (?, 'sign_in', 'authorized', ?, ?, ?, ?, 1, 1, 'dek-iv', 'wrapped-dek',
-             'payload-iv', 'ciphertext', ?, ?, 'Redeemed browser', 'web', ?, ?, ?)`,
+       tasknotes_pkce_challenge, authorized_principal_id, authorized_identity_id,
+       exchange_started_at, exchange_deadline_at, device_name, client_kind,
+       created_at, expires_at, callback_completed_at)
+     VALUES (?, 'sign_in', 'authorized', ?, ?, ?, ?, ?, ?, ?, ?,
+             'Redeemed browser', 'web', ?, ?, ?)`,
   )
     .bind(
       id,
@@ -93,9 +94,11 @@ async function addAuthorizedSignIn(
       overrides.challenge ?? `challenge-${id}`,
       principalId,
       identityId,
+      now - 5,
+      completedAt,
       now - 10,
-      overrides.expiresAt ?? now + 600,
-      now,
+      expiresAt,
+      completedAt,
     )
     .run();
 }
@@ -119,13 +122,14 @@ async function addAuthorizedConnect(
   await testEnv.DB.prepare(
     `INSERT INTO oauth_transactions
       (id, intent, status, state_hash, nonce_hash, polling_secret_hash,
-       tasknotes_pkce_challenge, provider_pkce_schema_version, provider_pkce_key_version,
-       provider_pkce_dek_iv, provider_pkce_wrapped_dek, provider_pkce_payload_iv,
-       provider_pkce_ciphertext, authenticated_principal_id, expected_identity_id,
+       tasknotes_pkce_challenge, authenticated_principal_id, expected_identity_id,
+       expected_connection_generation, expected_connection_id, expected_token_version,
+       target_connection_id, target_connection_generation, target_token_version,
        authorized_principal_id, authorized_identity_id, authorized_connection_id,
-       device_name, client_kind, created_at, expires_at, callback_completed_at)
-     VALUES (?, 'connect_calendar', 'authorized', ?, ?, ?, ?, 1, 1, 'dek-iv', 'wrapped-dek',
-             'payload-iv', 'ciphertext', ?, ?, ?, ?, ?, 'Browser', 'web', ?, ?, ?)`,
+       exchange_started_at, exchange_deadline_at, device_name, client_kind,
+       created_at, expires_at, callback_completed_at)
+     VALUES (?, 'connect_calendar', 'authorized', ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, 2, 2,
+             ?, ?, ?, ?, ?, 'Browser', 'web', ?, ?, ?)`,
   )
     .bind(
       id,
@@ -135,9 +139,13 @@ async function addAuthorizedConnect(
       `challenge-${id}`,
       principalId,
       identityId,
+      `connection-${id}`,
+      `connection-${id}`,
       principalId,
       identityId,
       `connection-${id}`,
+      now - 5,
+      now + 5,
       now - 10,
       now + 600,
       now,
@@ -160,6 +168,7 @@ async function storedSession(id: string): Promise<StoredSession> {
 }
 
 beforeEach(async () => {
+  await testEnv.DB.prepare("DELETE FROM oauth_transactions").run();
   await testEnv.DB.prepare("DELETE FROM principals").run();
   clock = new MutableClock();
   sessions = new DeviceSessions({

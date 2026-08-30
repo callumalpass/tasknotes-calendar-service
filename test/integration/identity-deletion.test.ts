@@ -94,16 +94,29 @@ beforeEach(async () => {
 });
 
 describe("identity deletion fencing against migrated D1", () => {
-  it("blocks equal and older OAuth transactions but permits a fresh post-deletion sign-in", async () => {
+  it("returns the digest used by deletion-wins conditional SQL", async () => {
     await insertPrincipal("principal-a");
     await insertIdentity("identity-a", "principal-a", GOOGLE_IDENTITY.subject);
 
     await expect(deleteIdentity()).resolves.toBe("completed");
-    await expect(deletion.checkOAuthTransaction(GOOGLE_IDENTITY, NOW + 9)).resolves.toBe("fenced");
-    await expect(deletion.checkOAuthTransaction(GOOGLE_IDENTITY, NOW + 10)).resolves.toBe("fenced");
-    await expect(deletion.checkOAuthTransaction(GOOGLE_IDENTITY, NOW + 11)).resolves.toBe(
-      "eligible",
-    );
+    const digest = await deletion.fenceDigest(GOOGLE_IDENTITY);
+    expect(digest).toHaveLength(43);
+    for (const [createdAt, eligible] of [
+      [NOW + 9, 0],
+      [NOW + 10, 0],
+      [NOW + 11, 1],
+    ] as const) {
+      await expect(
+        testEnv.DB.prepare(
+          `SELECT NOT EXISTS (
+             SELECT 1 FROM identity_deletion_fences
+             WHERE identity_digest = ? AND deleted_at >= ?
+           ) AS eligible`,
+        )
+          .bind(digest, createdAt)
+          .first("eligible"),
+      ).resolves.toBe(eligible);
+    }
   });
 
   it("binds fences to the immutable subject and ignores matching email metadata", async () => {
@@ -118,29 +131,27 @@ describe("identity deletion fencing against migrated D1", () => {
 
     await deleteIdentity();
 
-    await expect(deletion.checkOAuthTransaction(GOOGLE_IDENTITY, NOW)).resolves.toBe("fenced");
-    await expect(deletion.checkOAuthTransaction(otherIdentity, NOW)).resolves.toBe("eligible");
+    expect(await deletion.fenceDigest(GOOGLE_IDENTITY)).not.toBe(
+      await deletion.fenceDigest(otherIdentity),
+    );
     expect(await count("principals")).toBe(1);
     expect(await testEnv.DB.prepare("SELECT id FROM principals").first("id")).toBe("principal-b");
   });
 
-  it("rejects noncanonical provider, issuer, unbounded subject, timestamps, and key sizes", async () => {
+  it("rejects noncanonical provider, issuer, invalid subjects, and key sizes", async () => {
     const invalidIdentities = [
       { ...GOOGLE_IDENTITY, provider: "microsoft" },
       { ...GOOGLE_IDENTITY, issuer: "accounts.google.com" },
       { ...GOOGLE_IDENTITY, subject: "" },
       { ...GOOGLE_IDENTITY, subject: "x".repeat(256) },
+      { ...GOOGLE_IDENTITY, subject: "é".repeat(128) },
       { ...GOOGLE_IDENTITY, subject: "line\nbreak" },
+      { ...GOOGLE_IDENTITY, subject: "delete\u007fcontrol" },
     ];
     for (const identity of invalidIdentities) {
-      await expect(
-        deletion.checkOAuthTransaction(identity as GoogleIdentityTuple, NOW),
-      ).rejects.toBeInstanceOf(IdentityDeletionInputError);
-    }
-    for (const timestamp of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-      await expect(
-        deletion.checkOAuthTransaction(GOOGLE_IDENTITY, timestamp),
-      ).rejects.toBeInstanceOf(IdentityDeletionInputError);
+      await expect(deletion.fenceDigest(identity as GoogleIdentityTuple)).rejects.toBeInstanceOf(
+        IdentityDeletionInputError,
+      );
     }
     expect(
       () =>

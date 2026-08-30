@@ -26,7 +26,6 @@ export interface DeleteIdentityInput {
   readonly identity: GoogleIdentityTuple;
 }
 
-export type OAuthTransactionEligibility = "eligible" | "fenced";
 export type IdentityDeletionResult = "completed" | "unavailable";
 
 export class IdentityDeletionInputError extends Error {
@@ -123,25 +122,9 @@ export class IdentityDeletion {
     this.#nowEpochSeconds = dependencies.nowEpochSeconds;
   }
 
-  public async checkOAuthTransaction(
-    identity: GoogleIdentityTuple,
-    createdAt: number,
-  ): Promise<OAuthTransactionEligibility> {
+  public async fenceDigest(identity: GoogleIdentityTuple): Promise<string> {
     validateIdentity(identity);
-    validateEpochSeconds(createdAt);
-    const digest = await identityDigest(this.#hmacKey, identity);
-    const fence = await this.#db
-      .prepare("SELECT deleted_at FROM identity_deletion_fences WHERE identity_digest = ?")
-      .bind(digest)
-      .first<{ deleted_at: number }>();
-
-    if (fence === null) {
-      return "eligible";
-    }
-    if (!Number.isSafeInteger(fence.deleted_at) || fence.deleted_at < 0) {
-      throw new Error("stored identity deletion fence has an invalid timestamp");
-    }
-    return createdAt > fence.deleted_at ? "eligible" : "fenced";
+    return identityDigest(this.#hmacKey, identity);
   }
 
   public async deletePrincipal(input: DeleteIdentityInput): Promise<IdentityDeletionResult> {

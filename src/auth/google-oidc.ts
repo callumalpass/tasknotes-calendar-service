@@ -31,6 +31,7 @@ const MAX_TOKEN_BYTES = 16_384;
 const MAX_ID_TOKEN_BYTES = 32_768;
 const MAX_RESPONSE_BYTES = 65_536;
 const MAX_CLAIM_BYTES = 2_048;
+const MAX_SUBJECT_BYTES = 255;
 const MAX_SCOPES = 32;
 const MAX_EXPIRES_IN_SECONDS = 86_400;
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -454,6 +455,20 @@ function boundedClaim(value: unknown, required: boolean): string | undefined {
   return value;
 }
 
+function isValidSubject(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    textEncoder.encode(value).length > MAX_SUBJECT_BYTES
+  ) {
+    return false;
+  }
+  return !Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+}
+
 function integerClaim(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     return fail("invalid_id_token");
@@ -515,8 +530,8 @@ async function verifyIdentity(
     validateAudience(payload, clientId);
     const nonce = boundedClaim(payload["nonce"], true);
     if (nonce === undefined) fail("invalid_id_token");
-    const subject = boundedClaim(payload.sub, true);
-    if (subject === undefined) fail("invalid_id_token");
+    const subject = payload.sub;
+    if (!isValidSubject(subject)) fail("invalid_id_token");
     const issuedAt = integerClaim(payload.iat);
     const expiresAt = integerClaim(payload.exp);
     if (
@@ -570,7 +585,7 @@ export async function exchangeGoogleCalendarCode(
   dependencies: GoogleOidcDependencies,
 ): Promise<GoogleCalendarConnectionResult> {
   const requiredCalendarScopes = validateCalendarScopes(input.requiredCalendarScopes);
-  assertBoundedAscii(input.expectedSubject);
+  if (!isValidSubject(input.expectedSubject)) fail("invalid_request");
   const tokens = await exchangeCode(endpoints, client, input, dependencies);
   const identity = await verifyIdentity(
     tokens.idToken,
