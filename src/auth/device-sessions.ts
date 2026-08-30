@@ -15,6 +15,7 @@ const DIGEST_BYTES = 32;
 const IDLE_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
 const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
 const LAST_USED_UPDATE_INTERVAL_SECONDS = 60 * 60;
+export const MAX_ACTIVE_DEVICE_SESSIONS = 100;
 const MAX_PRINCIPAL_ID_BYTES = 256;
 const textEncoder = new TextEncoder();
 
@@ -102,6 +103,13 @@ export class PrincipalUnavailableError extends Error {
   public constructor() {
     super("principal is unavailable");
     this.name = "PrincipalUnavailableError";
+  }
+}
+
+export class DeviceSessionLimitError extends Error {
+  public constructor() {
+    super("active device session limit reached");
+    this.name = "DeviceSessionLimitError";
   }
 }
 
@@ -245,7 +253,10 @@ export class DeviceSessions {
         )
         SELECT ?, id, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
         FROM principals
-        WHERE id = ?`,
+        WHERE id = ?
+          AND (SELECT COUNT(*) FROM device_sessions
+               WHERE principal_id = principals.id AND revoked_at IS NULL
+                 AND idle_expires_at > ? AND absolute_expires_at > ?) < ?`,
       )
       .bind(
         generated.id,
@@ -257,9 +268,17 @@ export class DeviceSessions {
         idleExpiresAt,
         absoluteExpiresAt,
         input.principalId,
+        now,
+        now,
+        MAX_ACTIVE_DEVICE_SESSIONS,
       )
       .run();
     if (result.meta.changes !== 1) {
+      const principal = await this.#db
+        .prepare("SELECT 1 FROM principals WHERE id = ?")
+        .bind(input.principalId)
+        .first();
+      if (principal !== null) throw new DeviceSessionLimitError();
       throw new PrincipalUnavailableError();
     }
 
@@ -309,6 +328,11 @@ export class DeviceSessions {
           AND transaction_record.tasknotes_pkce_challenge = ?
           AND transaction_record.expires_at > ?
           AND transaction_record.authorized_principal_id IS NOT NULL
+          AND (SELECT COUNT(*) FROM device_sessions AS active_session
+               WHERE active_session.principal_id = transaction_record.authorized_principal_id
+                 AND active_session.revoked_at IS NULL
+                 AND active_session.idle_expires_at > ?
+                 AND active_session.absolute_expires_at > ?) < ?
         RETURNING id, device_name, client_kind, created_at, last_used_at,
                   idle_expires_at, absolute_expires_at, revoked_at`,
       )
@@ -323,6 +347,9 @@ export class DeviceSessions {
         input.expectedPollingDigest,
         input.expectedTasknotesPkceChallenge,
         now,
+        now,
+        now,
+        MAX_ACTIVE_DEVICE_SESSIONS,
       );
     const consume = this.#db
       .prepare(
@@ -450,16 +477,19 @@ export class DeviceSessions {
 
   public async list(principalId: string): Promise<readonly DeviceSessionMetadata[]> {
     validatePrincipalId(principalId);
+    const now = validatedNow(this.#clock);
     const result = await this.#db
       .prepare(
         `SELECT s.id, s.device_name, s.client_kind, s.created_at, s.last_used_at,
                 s.idle_expires_at, s.absolute_expires_at, s.revoked_at
          FROM device_sessions s
          JOIN principals p ON p.id = s.principal_id
-         WHERE s.principal_id = ?
-         ORDER BY s.created_at DESC, s.id DESC`,
+         WHERE s.principal_id = ? AND s.revoked_at IS NULL
+           AND s.idle_expires_at > ? AND s.absolute_expires_at > ?
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT ?`,
       )
-      .bind(principalId)
+      .bind(principalId, now, now, MAX_ACTIVE_DEVICE_SESSIONS)
       .all<MetadataRow>();
     return result.results.map(metadata);
   }

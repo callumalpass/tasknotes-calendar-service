@@ -10,7 +10,7 @@ describe("health endpoints", () => {
     const response = await exports.default.fetch(new Request("https://calendar.test/health/live"));
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     await expect(response.json()).resolves.toEqual({ status: "ok" });
   });
 
@@ -27,7 +27,7 @@ describe("health endpoints", () => {
     const response = await exports.default.fetch(new Request("https://calendar.test/not-found"));
 
     expect(response.status).toBe(404);
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     await expect(response.json()).resolves.toEqual({
       code: "resource_not_found",
       message: "Resource not found.",

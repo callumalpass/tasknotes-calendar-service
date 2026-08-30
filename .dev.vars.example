@@ -1,6 +1,7 @@
 # Local fake-provider values only. Never put real credentials in this file.
 GOOGLE_CLIENT_SECRET=local-fake-google-secret
-TOKEN_KEK_V1=base64url-encoded-32-byte-local-test-key
+OAUTH_TRANSACTION_KEK_V1=base64url-encoded-distinct-32-byte-local-test-key
+TOKEN_KEK_V1=base64url-encoded-distinct-32-byte-local-test-key
 SESSION_PEPPER=base64url-encoded-32-byte-local-test-key
 IDENTITY_FENCE_KEY=base64url-encoded-32-byte-local-test-key
 CURSOR_KEY=base64url-encoded-32-byte-local-test-key

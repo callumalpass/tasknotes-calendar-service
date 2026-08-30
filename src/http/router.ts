@@ -10,6 +10,16 @@ import { ContractError, errorResponse, jsonResponse, noContentResponse } from ".
 export interface AuthenticatedRouteContext {
   readonly principalId: string;
   readonly sessionId: string;
+  readonly session: Readonly<{
+    readonly id: string;
+    readonly deviceName: string;
+    readonly clientKind: "web" | "ios" | "android" | "obsidian";
+    readonly createdAt: string;
+    readonly lastUsedAt: string;
+    readonly idleExpiresAt: string;
+    readonly absoluteExpiresAt: string;
+    readonly revokedAt: string | null;
+  }>;
 }
 
 export interface RouteInput {
@@ -20,9 +30,19 @@ export interface RouteInput {
 }
 
 export interface RouterAuthentication {
-  authenticate(
-    credential: string,
-  ): Promise<{ readonly principalId: string; readonly session: { readonly id: string } } | null>;
+  authenticate(credential: string): Promise<{
+    readonly principalId: string;
+    readonly session: {
+      readonly id: string;
+      readonly deviceName: string;
+      readonly clientKind: "web" | "ios" | "android" | "obsidian";
+      readonly createdAt: string;
+      readonly lastUsedAt: string;
+      readonly idleExpiresAt: string;
+      readonly absoluteExpiresAt: string;
+      readonly revokedAt: string | null;
+    };
+  } | null>;
 }
 
 export type RouteHandler = (input: RouteInput, request: Request) => Promise<unknown>;
@@ -80,7 +100,8 @@ async function authenticate(
     throw new Error("Authentication dependency failed");
   }
   if (result === null) throw new AuthenticationRequiredError();
-  return Object.freeze({ principalId: result.principalId, sessionId: result.session.id });
+  const session = Object.freeze({ ...result.session });
+  return Object.freeze({ principalId: result.principalId, sessionId: session.id, session });
 }
 
 function parseQuery(url: URL): Record<string, string> {

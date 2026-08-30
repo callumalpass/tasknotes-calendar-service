@@ -73,7 +73,21 @@ function handlers(overrides: Partial<Record<RouteName, RouteHandler>> = {}): Rou
 
 function authenticateSuccessfully(value: string) {
   return Promise.resolve(
-    value === credential ? { principalId: id, session: { id: deviceId } } : null,
+    value === credential
+      ? {
+          principalId: id,
+          session: {
+            id: deviceId,
+            deviceName: "Browser",
+            clientKind: "web" as const,
+            createdAt: instant,
+            lastUsedAt: instant,
+            idleExpiresAt: instant,
+            absoluteExpiresAt: instant,
+            revokedAt: null,
+          },
+        }
+      : null,
   );
 }
 
@@ -350,8 +364,22 @@ describe("contract router", () => {
       expect(response.status).toBeLessThan(400);
       expect(authenticate).toHaveBeenCalledOnce();
       expect(authenticate).toHaveBeenCalledWith(credential);
-      expect(received?.authenticated).toEqual({ principalId: id, sessionId: deviceId });
+      expect(received?.authenticated).toEqual({
+        principalId: id,
+        sessionId: deviceId,
+        session: {
+          id: deviceId,
+          deviceName: "Browser",
+          clientKind: "web",
+          createdAt: instant,
+          lastUsedAt: instant,
+          idleExpiresAt: instant,
+          absoluteExpiresAt: instant,
+          revokedAt: null,
+        },
+      });
       expect(Object.isFrozen(received?.authenticated)).toBe(true);
+      expect(Object.isFrozen(received?.authenticated?.session)).toBe(true);
       expect(Object.isFrozen(received)).toBe(true);
       expect(JSON.stringify(received)).not.toContain(credential);
     },

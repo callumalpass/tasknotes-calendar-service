@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   DeviceSessionInputError,
+  DeviceSessionLimitError,
   DeviceSessions,
   PrincipalUnavailableError,
 } from "../../src/auth/device-sessions";
@@ -180,6 +181,65 @@ beforeEach(async () => {
 });
 
 describe("device sessions against migrated D1", () => {
+  it("transactionally caps a principal at 100 active sessions under 101 concurrent creates", async () => {
+    await addPrincipal("principal-limit");
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: 101 }, (_, index) =>
+        sessions.create({
+          principalId: "principal-limit",
+          deviceName: `Device ${index + 1}`,
+          clientKind: "web",
+        }),
+      ),
+    );
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(100);
+    const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    const failure = rejected[0];
+    expect(failure?.reason).toBeInstanceOf(DeviceSessionLimitError);
+    expect(
+      await testEnv.DB.prepare(
+        "SELECT COUNT(*) AS count FROM device_sessions WHERE principal_id = ? AND revoked_at IS NULL",
+      )
+        .bind("principal-limit")
+        .first(),
+    ).toEqual({ count: 100 });
+    await expect(sessions.list("principal-limit")).resolves.toHaveLength(100);
+  });
+
+  it("applies the same active-session cap during atomic sign-in redemption", async () => {
+    await addPrincipal("principal-redemption-limit");
+    await addGoogleIdentity(
+      "identity-redemption-limit",
+      "principal-redemption-limit",
+      "subject-redemption-limit",
+    );
+    for (let index = 0; index < 100; index += 1) {
+      await sessions.create({
+        principalId: "principal-redemption-limit",
+        deviceName: `Existing ${index + 1}`,
+        clientKind: "web",
+      });
+    }
+    await addAuthorizedSignIn(
+      "transaction-redemption-limit",
+      "principal-redemption-limit",
+      "identity-redemption-limit",
+    );
+    await expect(
+      sessions.redeemSignInTransaction({
+        transactionId: "transaction-redemption-limit",
+        expectedPollingDigest: "poll-transaction-redemption-limit",
+        expectedTasknotesPkceChallenge: "challenge-transaction-redemption-limit",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      testEnv.DB.prepare("SELECT status FROM oauth_transactions WHERE id = ?")
+        .bind("transaction-redemption-limit")
+        .first("status"),
+    ).resolves.toBe("authorized");
+  });
+
   it("returns a 256-bit opaque secret once and persists only a keyed digest", async () => {
     await addPrincipal("principal-a");
 

@@ -8,7 +8,9 @@ export interface Env {
   GOOGLE_TOKEN_ENDPOINT: string;
   GOOGLE_JWKS_URI: string;
   GOOGLE_ISSUER: string;
+  GOOGLE_REVOCATION_ENDPOINT: string;
   GOOGLE_CALENDAR_API_ORIGIN: string;
+  OAUTH_TRANSACTION_KEK_V1: string;
   TOKEN_KEK_V1: string;
   SESSION_PEPPER: string;
   IDENTITY_FENCE_KEY: string;
