@@ -254,6 +254,20 @@ export class LiveGoogleCalendar {
     const resolved = await this.#eventGrant(authenticatedPrincipalId, publicCalendarId);
     if (resolved === null) return fail("not_found");
     const expected = authority(resolved);
+    let pageToken: string | undefined;
+    if (query.cursor !== undefined) {
+      try {
+        pageToken = await openEventCursor(
+          query.cursor,
+          this.#cursorBinding(expected, publicCalendarId, query),
+          now(this.#dependencies),
+          this.#dependencies.cursorKey,
+        );
+      } catch (error) {
+        if (error instanceof CursorError) return fail("invalid_request");
+        return fail("internal");
+      }
+    }
     let snapshot: ConnectionSnapshot | null;
     let grant: AccessGrant;
     try {
@@ -265,20 +279,6 @@ export class LiveGoogleCalendar {
       if (error instanceof GoogleAccessTokenError && ["conflict", "reconnect"].includes(error.code))
         return fail("not_found");
       return this.#tokenFailure(error);
-    }
-    let pageToken: string | undefined;
-    if (query.cursor !== undefined) {
-      try {
-        pageToken = await openEventCursor(
-          query.cursor,
-          this.#cursorBinding(grant, publicCalendarId, query),
-          now(this.#dependencies),
-          this.#dependencies.cursorKey,
-        );
-      } catch (error) {
-        if (error instanceof CursorError) return fail("invalid_request");
-        return fail("internal");
-      }
     }
     let result = await this.#eventsPage(grant, resolved.provider_calendar_id, query, pageToken);
     if (!result.ok && result.error.code === "unauthorized") {
@@ -308,7 +308,7 @@ export class LiveGoogleCalendar {
       try {
         nextCursor = await sealEventCursor(
           result.value.nextPageToken,
-          this.#cursorBinding(grant, publicCalendarId, query),
+          this.#cursorBinding(expected, publicCalendarId, query),
           now(this.#dependencies),
           this.#dependencies.cursorKey,
           this.#dependencies.random,
@@ -328,11 +328,11 @@ export class LiveGoogleCalendar {
     return { events: [...events], next_cursor: nextCursor };
   }
 
-  #cursorBinding(grant: AccessGrant, calendarId: string, query: EventsQuery) {
+  #cursorBinding(authority: DiscoveryAuthority, calendarId: string, query: EventsQuery) {
     return {
-      principalId: grant.principalId,
-      connectionId: grant.connectionId,
-      connectionGeneration: grant.generation,
+      principalId: authority.principalId,
+      connectionId: authority.connectionId,
+      connectionGeneration: authority.generation,
       calendarId,
       rangeStart: query.start,
       rangeEnd: query.end,
@@ -453,7 +453,11 @@ export class LiveGoogleCalendar {
       if (current === null || !sameAuthority(expected, current) || current.status !== "active")
         return this.#staleDiscovery(current);
       return (
-        current.token_version === expected.tokenVersion && current.discovery_lease_owner === owner
+        current.token_version === expected.tokenVersion &&
+        current.discovery_version === expected.discoveryVersion &&
+        current.discovery_lease_owner === owner &&
+        current.discovery_lease_until !== null &&
+        current.discovery_lease_until > current.server_now
       );
     }
   }
@@ -518,8 +522,9 @@ export class LiveGoogleCalendar {
              discovery_lease_generation = NULL, discovery_lease_token_version = NULL,
              updated_at = MAX(unixepoch(), updated_at)
            WHERE id = ? AND principal_id = ? AND provider = 'google' AND status = 'active'
-             AND generation = ? AND token_version = ? AND discovery_lease_owner = ?
-             AND discovery_lease_generation = ? AND discovery_lease_token_version = ?
+             AND generation = ? AND token_version = ? AND discovery_version = ?
+             AND discovery_lease_owner = ? AND discovery_lease_generation = ?
+             AND discovery_lease_token_version = ?
              AND EXISTS (SELECT 1 FROM principals WHERE id = ?
                AND google_connection_generation = ?)`,
         )
@@ -528,6 +533,7 @@ export class LiveGoogleCalendar {
           expected.principalId,
           expected.generation,
           expected.tokenVersion,
+          expected.discoveryVersion,
           owner,
           expected.generation,
           expected.tokenVersion,
@@ -545,34 +551,65 @@ export class LiveGoogleCalendar {
     owner: string,
     calendars: readonly ProviderCalendar[],
   ): Promise<Calendar[]> {
-    const timestamp = now(this.#dependencies);
     const ids = new Set<string>();
-    const statements: D1PreparedStatement[] = [];
+    const candidates: {
+      id: string;
+      providerId: string;
+      name: string;
+      description: string | null;
+      timeZone: string | null;
+      access: ProviderCalendar["access"];
+      primary: number;
+    }[] = [];
     for (const calendar of calendars) {
       if (ids.has(calendar.id)) {
         await this.#release(expected, owner);
         return fail("unavailable");
       }
       ids.add(calendar.id);
-      let candidate: string;
       try {
-        candidate = canonicalUuid(this.#dependencies.uuid());
+        candidates.push({
+          id: canonicalUuid(this.#dependencies.uuid()),
+          providerId: calendar.id,
+          name: calendar.name,
+          description: calendar.description ?? null,
+          timeZone: calendar.timeZone ?? null,
+          access: calendar.access,
+          primary: calendar.primary ? 1 : 0,
+        });
       } catch {
         await this.#release(expected, owner);
         return fail("internal");
       }
+    }
+    const statements: D1PreparedStatement[] = [];
+    if (candidates.length > 0) {
       statements.push(
         this.#dependencies.db
           .prepare(
-            `INSERT INTO calendars
+            `WITH input AS (
+               SELECT json_extract(value, '$.id') AS id,
+                      json_extract(value, '$.providerId') AS provider_id,
+                      json_extract(value, '$.name') AS name,
+                      json_extract(value, '$.description') AS description,
+                      json_extract(value, '$.timeZone') AS time_zone,
+                      json_extract(value, '$.access') AS access_role,
+                      json_extract(value, '$.primary') AS is_primary
+               FROM json_each(?)
+             )
+             INSERT INTO calendars
                (id, principal_id, connection_id, provider_calendar_id, name, description, color,
                 time_zone, access_role, is_primary, etag, discovered_at, updated_at)
-             SELECT ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?
+             SELECT input.id, ?, ?, input.provider_id, input.name, input.description, NULL,
+                    input.time_zone, input.access_role, input.is_primary, NULL,
+                    unixepoch(), unixepoch()
+             FROM input
              WHERE EXISTS (SELECT 1 FROM connections AS connection JOIN principals AS principal
                ON principal.id = connection.principal_id
                WHERE connection.id = ? AND connection.principal_id = ?
                  AND connection.provider = 'google' AND connection.status = 'active'
                  AND connection.generation = ? AND connection.token_version = ?
+                 AND connection.discovery_version = ?
                  AND connection.discovery_lease_owner = ?
                  AND connection.discovery_lease_generation = ?
                  AND connection.discovery_lease_token_version = ?
@@ -580,25 +617,19 @@ export class LiveGoogleCalendar {
              ON CONFLICT(connection_id, provider_calendar_id) DO UPDATE SET
                name = excluded.name, description = excluded.description, color = NULL,
                time_zone = excluded.time_zone, access_role = excluded.access_role,
-               is_primary = excluded.is_primary, etag = NULL, updated_at = excluded.updated_at
+               is_primary = excluded.is_primary, etag = NULL,
+               updated_at = MAX(unixepoch(), calendars.updated_at)
              WHERE calendars.principal_id = excluded.principal_id`,
           )
           .bind(
-            candidate,
+            JSON.stringify(candidates),
             expected.principalId,
             expected.connectionId,
-            calendar.id,
-            calendar.name,
-            calendar.description ?? null,
-            calendar.timeZone ?? null,
-            calendar.access,
-            calendar.primary ? 1 : 0,
-            timestamp,
-            timestamp,
             expected.connectionId,
             expected.principalId,
             expected.generation,
             expected.tokenVersion,
+            expected.discoveryVersion,
             owner,
             expected.generation,
             expected.tokenVersion,
@@ -606,17 +637,21 @@ export class LiveGoogleCalendar {
           ),
       );
     }
-    const placeholders = calendars.map(() => "?").join(", ");
     statements.push(
       this.#dependencies.db
         .prepare(
           `DELETE FROM calendars WHERE principal_id = ? AND connection_id = ?
-             ${calendars.length === 0 ? "" : `AND provider_calendar_id NOT IN (${placeholders})`}
+             ${
+               calendars.length === 0
+                 ? ""
+                 : "AND provider_calendar_id NOT IN (SELECT value FROM json_each(?))"
+             }
              AND EXISTS (SELECT 1 FROM connections AS connection JOIN principals AS principal
                ON principal.id = connection.principal_id
                WHERE connection.id = ? AND connection.principal_id = ?
                  AND connection.provider = 'google' AND connection.status = 'active'
                  AND connection.generation = ? AND connection.token_version = ?
+                 AND connection.discovery_version = ?
                  AND connection.discovery_lease_owner = ?
                  AND connection.discovery_lease_generation = ?
                  AND connection.discovery_lease_token_version = ?
@@ -625,11 +660,14 @@ export class LiveGoogleCalendar {
         .bind(
           expected.principalId,
           expected.connectionId,
-          ...calendars.map((calendar) => calendar.id),
+          ...(calendars.length === 0
+            ? []
+            : [JSON.stringify(calendars.map((calendar) => calendar.id))]),
           expected.connectionId,
           expected.principalId,
           expected.generation,
           expected.tokenVersion,
+          expected.discoveryVersion,
           owner,
           expected.generation,
           expected.tokenVersion,
@@ -645,8 +683,9 @@ export class LiveGoogleCalendar {
              updated_at = MAX(unixepoch(), updated_at),
              last_provider_success_at = MAX(unixepoch(), updated_at)
            WHERE id = ? AND principal_id = ? AND provider = 'google' AND status = 'active'
-             AND generation = ? AND token_version = ? AND discovery_lease_owner = ?
-             AND discovery_lease_generation = ? AND discovery_lease_token_version = ?
+             AND generation = ? AND token_version = ? AND discovery_version = ?
+             AND discovery_lease_owner = ? AND discovery_lease_generation = ?
+             AND discovery_lease_token_version = ?
              AND EXISTS (SELECT 1 FROM principals WHERE id = ?
                AND google_connection_generation = ?)`,
         )
@@ -655,6 +694,7 @@ export class LiveGoogleCalendar {
           expected.principalId,
           expected.generation,
           expected.tokenVersion,
+          expected.discoveryVersion,
           owner,
           expected.generation,
           expected.tokenVersion,
@@ -683,6 +723,7 @@ export class LiveGoogleCalendar {
       sameAuthority(expected, current) &&
       current.status === "active" &&
       current.token_version === expected.tokenVersion &&
+      current.discovery_version === expected.discoveryVersion &&
       current.discovery_lease_owner === owner
     ) {
       try {
