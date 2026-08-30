@@ -16,9 +16,10 @@ import type { RandomByteSource } from "../../../src/crypto/random";
 import type { KeyEncryptionKeyring } from "../../../src/crypto/token-envelope";
 
 const verifier = "A".repeat(43);
+const otherTransactionId = encodeBase64Url(new Uint8Array(32).fill(18));
 const context: OAuthTransactionSecretContext = {
   environment: "test",
-  transactionId: "transaction-1",
+  transactionId: encodeBase64Url(new Uint8Array(32).fill(17)),
   intent: "sign_in",
 };
 const key1 = Uint8Array.from({ length: 32 }, (_, index) => index);
@@ -155,7 +156,7 @@ describe("OAuth transaction provider PKCE secrets", () => {
 
   it.each([
     ["environment", "production"],
-    ["transactionId", "transaction-2"],
+    ["transactionId", otherTransactionId],
     ["intent", "connect_calendar"],
   ] as const)("binds the %s AAD component", async (component, replacement) => {
     const envelope = await makeEnvelope();
@@ -235,6 +236,13 @@ describe("OAuth transaction provider PKCE secrets", () => {
   it("rejects invalid contexts, keys, and random-source output", async () => {
     await expect(
       encryptOAuthTransactionProviderPkce(verifier, { ...context, environment: "" }, keyring),
+    ).rejects.toBeInstanceOf(OAuthTransactionSecretError);
+    await expect(
+      encryptOAuthTransactionProviderPkce(
+        verifier,
+        { ...context, transactionId: "not-a-transaction-id" },
+        keyring,
+      ),
     ).rejects.toBeInstanceOf(OAuthTransactionSecretError);
     await expect(
       encryptOAuthTransactionProviderPkce(

@@ -69,7 +69,11 @@ function assertBoundedString(value: unknown, maximumBytes: number): asserts valu
 
 function validateContext(context: OAuthTransactionSecretContext): void {
   assertBoundedString(context.environment, 64);
-  assertBoundedString(context.transactionId, 256);
+  try {
+    decodeBase64Url(context.transactionId, { minBytes: 32, maxBytes: 32 });
+  } catch {
+    throw new TypeError("transaction identifier is invalid");
+  }
   const intent: unknown = context.intent;
   if (intent !== "sign_in" && intent !== "connect_calendar") {
     throw new TypeError("transaction intent is invalid");
