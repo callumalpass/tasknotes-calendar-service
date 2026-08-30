@@ -11,5 +11,6 @@ export interface Env {
   GOOGLE_CALENDAR_API_ORIGIN: string;
   TOKEN_KEK_V1: string;
   SESSION_PEPPER: string;
+  IDENTITY_FENCE_KEY: string;
   CURSOR_KEY: string;
 }

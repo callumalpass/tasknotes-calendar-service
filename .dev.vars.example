@@ -2,4 +2,5 @@
 GOOGLE_CLIENT_SECRET=local-fake-google-secret
 TOKEN_KEK_V1=base64url-encoded-32-byte-local-test-key
 SESSION_PEPPER=base64url-encoded-32-byte-local-test-key
+IDENTITY_FENCE_KEY=base64url-encoded-32-byte-local-test-key
 CURSOR_KEY=base64url-encoded-32-byte-local-test-key
