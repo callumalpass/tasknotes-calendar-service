@@ -137,6 +137,12 @@ function now(dependencies: OAuthTransactionsDependencies): number {
   return value;
 }
 
+async function databaseNow(db: D1Database): Promise<number> {
+  const value = await db.prepare("SELECT unixepoch() AS database_now").first("database_now");
+  if (!Number.isSafeInteger(value) || (value as number) < 0) return fail("internal");
+  return value as number;
+}
+
 function canonicalUuid(value: unknown): string {
   const parsed = UuidSchema.safeParse(value);
   if (!parsed.success) return fail("internal");
@@ -870,12 +876,13 @@ export class OAuthTransactions {
         issuer: CANONICAL_ISSUER,
         subject: transaction.expected_subject,
       });
+      const tokenCommittedAt = await databaseNow(this.#dependencies.db);
       const envelope = tokenEnvelopeToRow(
         await encryptTokenEnvelope(
           {
             accessToken: result.tokenMaterial.accessToken,
             refreshToken,
-            expiresAtEpochSeconds: completedAt + result.tokenMaterial.expiresInSeconds,
+            expiresAtEpochSeconds: tokenCommittedAt + result.tokenMaterial.expiresInSeconds,
             scopes: result.tokenMaterial.scopes,
           },
           {
@@ -942,9 +949,9 @@ export class OAuthTransactions {
                 envelope.payload_iv,
                 envelope.ciphertext,
                 tokenVersion,
-                completedAt,
-                completedAt,
-                completedAt,
+                tokenCommittedAt,
+                tokenCommittedAt,
+                tokenCommittedAt,
                 ...common,
                 principalId,
                 transaction.expected_connection_generation,
@@ -972,8 +979,8 @@ export class OAuthTransactions {
                 envelope.wrapped_dek,
                 envelope.payload_iv,
                 envelope.ciphertext,
-                completedAt,
-                completedAt,
+                tokenCommittedAt,
+                tokenCommittedAt,
                 connectionId,
                 principalId,
                 identityId,

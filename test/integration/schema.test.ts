@@ -255,7 +255,7 @@ describe("initial D1 schema invariants", () => {
     expect(await epoch()).toBe(3);
   });
 
-  it("enforces complete, bounded refresh leases and acquire/steal/release concurrency", async () => {
+  it("enforces complete, 120-second, non-stealable refresh leases", async () => {
     await principal();
     await identity();
     await connection();
@@ -272,7 +272,7 @@ describe("initial D1 schema invariants", () => {
     ]) {
       await expect(testEnv.DB.prepare(sql).run()).rejects.toThrow();
     }
-    await expect(acquireRefreshLease("worker-a", NOW + 1, NOW + 62)).rejects.toThrow(
+    await expect(acquireRefreshLease("worker-a", NOW + 1, NOW + 122)).rejects.toThrow(
       "invalid connection authority transition",
     );
     await acquireRefreshLease("worker-a", NOW + 1, NOW + 31);
@@ -290,17 +290,18 @@ describe("initial D1 schema invariants", () => {
       .run();
     expect(nonOwner.meta.changes).toBe(0);
 
-    await acquireRefreshLease("worker-b", NOW + 31, NOW + 61);
-    await expect(
-      testEnv.DB.prepare(
-        `UPDATE connections SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
-         refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
-         WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-b'
-         AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
-      )
-        .bind(NOW + 32)
-        .run(),
-    ).resolves.toMatchObject({ meta: { changes: 1 } });
+    await expect(acquireRefreshLease("worker-b", NOW + 31, NOW + 61)).rejects.toThrow(
+      "invalid connection authority transition",
+    );
+    await testEnv.DB.prepare(
+      `UPDATE connections SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
+       refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
+       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-a'
+       AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
+    )
+      .bind(NOW + 32)
+      .run();
+    await acquireRefreshLease("worker-b", NOW + 33, NOW + 153);
 
     await expect(
       testEnv.DB.prepare(
@@ -327,27 +328,16 @@ describe("initial D1 schema invariants", () => {
     }
   });
 
-  it("requires exact refresh ownership, rejects a stale owner, and permits expired commit and rewrap", async () => {
+  it("makes refresh leases non-stealable and permits only the exact owner to commit after expiry", async () => {
     await principal();
     await identity();
     await connection();
-    await acquireRefreshLease("worker-a", NOW + 1, NOW + 31);
-    await acquireRefreshLease("worker-b", NOW + 31, NOW + 61);
+    await acquireRefreshLease("worker-a", NOW + 1, NOW + 121);
+    await expect(acquireRefreshLease("worker-b", NOW + 121, NOW + 241)).rejects.toThrow(
+      "invalid connection authority transition",
+    );
 
-    const stale = await testEnv.DB.prepare(
-      `UPDATE connections
-       SET token_version = token_version + 1, key_version = 2,
-           dek_iv = 'dek-2', wrapped_dek = 'wrapped-2', payload_iv = 'payload-2',
-           ciphertext = 'ciphertext-2', refresh_lease_owner = NULL, refresh_lease_until = NULL,
-           refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
-       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-a'
-       AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
-    )
-      .bind(NOW + 100)
-      .run();
-    expect(stale.meta.changes).toBe(0);
-
-    await testEnv.DB.prepare(
+    const nonOwner = await testEnv.DB.prepare(
       `UPDATE connections
        SET token_version = token_version + 1, key_version = 2,
            dek_iv = 'dek-2', wrapped_dek = 'wrapped-2', payload_iv = 'payload-2',
@@ -356,7 +346,20 @@ describe("initial D1 schema invariants", () => {
        WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-b'
        AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
     )
-      .bind(NOW + 100)
+      .bind(NOW + 200)
+      .run();
+    expect(nonOwner.meta.changes).toBe(0);
+
+    await testEnv.DB.prepare(
+      `UPDATE connections
+       SET token_version = token_version + 1, key_version = 2,
+           dek_iv = 'dek-2', wrapped_dek = 'wrapped-2', payload_iv = 'payload-2',
+           ciphertext = 'ciphertext-2', refresh_lease_owner = NULL, refresh_lease_until = NULL,
+           refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
+       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-a'
+       AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
+    )
+      .bind(NOW + 200)
       .run();
     expect(await epoch()).toBe(1);
 
@@ -365,7 +368,7 @@ describe("initial D1 schema invariants", () => {
        SET key_version = 3, dek_iv = 'dek-3', wrapped_dek = 'wrapped-3', updated_at = ?
        WHERE id = 'connection-a'`,
     )
-      .bind(NOW + 101)
+      .bind(NOW + 201)
       .run();
     await expect(
       testEnv.DB.prepare(
