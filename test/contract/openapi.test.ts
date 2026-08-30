@@ -36,7 +36,7 @@ describe("OpenAPI and runtime contract", () => {
     expect(spec).toContain(`maxLength: ${MAX_CURSOR_LENGTH}`);
     expect(spec).toContain(`${MAX_RANGE_DAYS} days`);
     expect(spec).toContain("maximum: 300");
-    expect(spec).toContain("const: no-store");
+    expect(spec).toContain('const: "private, no-store"');
     expect(spec).toContain("const: nosniff");
     expect(spec).toContain(`enum: [${CLIENT_KINDS.join(", ")}]`);
   });

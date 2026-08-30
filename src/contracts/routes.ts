@@ -21,7 +21,7 @@ import {
   TransactionRedeemRequestSchema,
   TransactionStartRequestSchema,
   TransactionStartResponseSchema,
-  TransactionStatusQuerySchema,
+  TransactionStatusRequestSchema,
   TransactionStatusResponseSchema,
 } from "./transactions";
 
@@ -100,10 +100,11 @@ export const routes: readonly RouteDefinition[] = [
   },
   {
     name: "signInStatus",
-    method: "GET",
+    method: "POST",
     path: "/v1/sign-in/{transaction_id}/status",
     authenticated: false,
-    query: TransactionStatusQuerySchema,
+    body: TransactionStatusRequestSchema,
+    query: EmptyObjectSchema,
     params: transactionParams,
     response: TransactionStatusResponseSchema,
     successStatus: 200,
@@ -132,10 +133,11 @@ export const routes: readonly RouteDefinition[] = [
   },
   {
     name: "connectStatus",
-    method: "GET",
+    method: "POST",
     path: "/v1/connections/google/{transaction_id}/status",
     authenticated: true,
-    query: TransactionStatusQuerySchema,
+    body: TransactionStatusRequestSchema,
+    query: EmptyObjectSchema,
     params: transactionParams,
     response: TransactionStatusResponseSchema,
     successStatus: 200,

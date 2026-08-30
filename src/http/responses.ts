@@ -1,7 +1,7 @@
 import type { ApiError } from "../contracts/common";
 
 export const JSON_HEADERS = {
-  "cache-control": "no-store",
+  "cache-control": "private, no-store",
   "content-type": "application/json; charset=utf-8",
   "x-content-type-options": "nosniff",
 } as const;
@@ -29,7 +29,7 @@ export function noContentResponse(): Response {
   return new Response(null, {
     status: 204,
     headers: {
-      "cache-control": "no-store",
+      "cache-control": "private, no-store",
       "x-content-type-options": "nosniff",
     },
   });

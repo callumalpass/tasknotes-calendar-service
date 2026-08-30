@@ -114,11 +114,31 @@ describe("contract router", () => {
     const response = await route(jsonRequest("/v1/sign-in/start", startBody));
     expect(response.status).toBe(201);
     expect(received?.body).toEqual(startBody);
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
 
     const invalid = await route(jsonRequest("/v1/sign-in/start", { ...startBody, extra: true }));
     expect(invalid.status).toBe(400);
+  });
+
+  it("keeps the polling capability out of status URLs", async () => {
+    let received: RouteInput | undefined;
+    const route = createRouter(
+      handlers({
+        signInStatus: (input) => {
+          received = input;
+          return Promise.resolve(validOutputs.signInStatus);
+        },
+      }),
+    );
+    const response = await route(
+      jsonRequest(`/v1/sign-in/${transactionId}/status`, { polling_secret: pollingSecret }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(received?.body).toEqual({ polling_secret: pollingSecret });
+    expect(received?.query).toEqual({});
+    expect(response.url).not.toContain(pollingSecret);
   });
 
   it("enforces JSON media type and actual body bytes", async () => {
@@ -141,23 +161,18 @@ describe("contract router", () => {
 
   it("rejects duplicate and unknown queries before invoking a handler", async () => {
     const route = createRouter(handlers());
-    const base = `/v1/sign-in/${transactionId}/status`;
+    const base = `/v1/calendars/${id}/events`;
+    const range = "start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z";
     expect(
       (
         await route(
-          new Request(
-            `https://calendar.test${base}?polling_secret=${pollingSecret}&polling_secret=${pollingSecret}`,
-          ),
+          new Request(`https://calendar.test${base}?${range}&start=2026-01-01T00%3A00%3A00Z`),
         )
       ).status,
     ).toBe(400);
-    expect(
-      (
-        await route(
-          new Request(`https://calendar.test${base}?polling_secret=${pollingSecret}&other=x`),
-        )
-      ).status,
-    ).toBe(400);
+    expect((await route(new Request(`https://calendar.test${base}?${range}&other=x`))).status).toBe(
+      400,
+    );
   });
 
   it("enforces UUID paths and a single bounded calendar range", async () => {
@@ -238,7 +253,7 @@ describe("contract router", () => {
     );
     expect(response.status).toBe(204);
     expect(await response.text()).toBe("");
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   });
 });

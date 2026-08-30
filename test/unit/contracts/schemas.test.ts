@@ -84,18 +84,30 @@ describe("public contract schemas", () => {
 
   it("accepts exactly a provider success or bounded provider error callback", () => {
     const state = "s".repeat(43);
-    expect(ProviderCallbackQuerySchema.safeParse({ code: "c".repeat(32), state }).success).toBe(
-      true,
-    );
-    expect(ProviderCallbackQuerySchema.safeParse({ error: "access_denied", state }).success).toBe(
-      true,
-    );
+    expect(
+      ProviderCallbackQuerySchema.safeParse({
+        code: "c".repeat(32),
+        state,
+        scope: "openid email profile",
+        authuser: "0",
+        prompt: "consent",
+        iss: "https://accounts.google.com",
+      }).success,
+    ).toBe(true);
+    expect(
+      ProviderCallbackQuerySchema.safeParse({
+        error: "provider_specific_error",
+        error_description: "Authorization failed",
+        state,
+      }).success,
+    ).toBe(true);
     expect(
       ProviderCallbackQuerySchema.safeParse({ code: "c".repeat(32), error: "access_denied", state })
         .success,
     ).toBe(false);
-    expect(ProviderCallbackQuerySchema.safeParse({ error: "unknown_error", state }).success).toBe(
-      false,
-    );
+    expect(
+      ProviderCallbackQuerySchema.safeParse({ code: "c".repeat(32), state, unrelated: "x" })
+        .success,
+    ).toBe(false);
   });
 });

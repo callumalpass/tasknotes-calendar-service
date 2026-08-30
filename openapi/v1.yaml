@@ -43,12 +43,13 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         "500": { $ref: "#/components/responses/InternalError" }
   /v1/sign-in/{transaction_id}/status:
-    get:
+    post:
       operationId: signInStatus
       tags: [Sign-in]
+      x-max-body-bytes: 16384
       parameters:
         - $ref: "#/components/parameters/TransactionId"
-        - $ref: "#/components/parameters/PollingSecret"
+      requestBody: { $ref: "#/components/requestBodies/TransactionStatus" }
       responses:
         "200": { $ref: "#/components/responses/TransactionStatus" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
@@ -94,13 +95,14 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         "500": { $ref: "#/components/responses/InternalError" }
   /v1/connections/google/{transaction_id}/status:
-    get:
+    post:
       operationId: connectStatus
       tags: [Connections]
       security: [{ bearerAuth: [] }]
+      x-max-body-bytes: 16384
       parameters:
         - $ref: "#/components/parameters/TransactionId"
-        - $ref: "#/components/parameters/PollingSecret"
+      requestBody: { $ref: "#/components/requestBodies/TransactionStatus" }
       responses:
         "200": { $ref: "#/components/responses/TransactionStatus" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
@@ -242,7 +244,9 @@ paths:
     get:
       operationId: providerCallback
       tags: [Connections]
-      description: OAuth provider redirect. Never returns a service credential or personal data.
+      description:
+        OAuth provider redirect. Exactly one of code or error is required. Recognized bounded Google
+        callback metadata is discarded. Never returns a service credential or personal data.
       parameters:
         - {
             name: state,
@@ -260,7 +264,33 @@ paths:
             name: error,
             in: query,
             required: false,
-            schema: { type: string, enum: [access_denied, temporarily_unavailable, server_error] },
+            schema: { type: string, pattern: "^[A-Za-z0-9._~-]{1,128}$" },
+          }
+        - { name: scope, in: query, required: false, schema: { type: string, maxLength: 2048 } }
+        - {
+            name: authuser,
+            in: query,
+            required: false,
+            schema: { type: string, pattern: "^\\d{1,10}$" },
+          }
+        - { name: prompt, in: query, required: false, schema: { type: string, maxLength: 128 } }
+        - {
+            name: iss,
+            in: query,
+            required: false,
+            schema: { type: string, enum: ["https://accounts.google.com", "accounts.google.com"] },
+          }
+        - {
+            name: error_description,
+            in: query,
+            required: false,
+            schema: { type: string, maxLength: 1024 },
+          }
+        - {
+            name: error_uri,
+            in: query,
+            required: false,
+            schema: { type: string, format: uri, maxLength: 2048 },
           }
       responses:
         "200":
@@ -292,7 +322,7 @@ components:
       scheme: bearer
       bearerFormat: opaque
   headers:
-    NoStore: { schema: { type: string, const: no-store } }
+    NoStore: { schema: { type: string, const: "private, no-store" } }
     NoSniff: { schema: { type: string, const: nosniff } }
     RetryAfter: { schema: { type: integer, minimum: 1, maximum: 300 } }
   parameters:
@@ -314,14 +344,11 @@ components:
         required: true,
         schema: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" },
       }
-    PollingSecret:
-      {
-        name: polling_secret,
-        in: query,
-        required: true,
-        schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" },
-      }
   requestBodies:
+    TransactionStatus:
+      required: true
+      content:
+        { application/json: { schema: { $ref: "#/components/schemas/TransactionStatusRequest" } } }
     TransactionStart:
       required: true
       content:
@@ -373,6 +400,12 @@ components:
         authorization_url: { type: string, format: uri, maxLength: 2048 }
         polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
         expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    TransactionStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [polling_secret]
+      properties:
+        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
     TransactionRedeemRequest:
       type: object
       additionalProperties: false

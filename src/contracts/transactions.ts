@@ -30,7 +30,7 @@ export const TransactionStartResponseSchema = z.strictObject({
   expires_at: Rfc3339InstantSchema,
 });
 
-export const TransactionStatusQuerySchema = z.strictObject({
+export const TransactionStatusRequestSchema = z.strictObject({
   polling_secret: PollingSecretSchema,
 });
 
@@ -63,17 +63,35 @@ export const ConnectRedeemResponseSchema = z.strictObject({
   status: z.literal("active"),
 });
 
+const CallbackMetadataSchema = {
+  scope: z
+    .string()
+    .regex(/^[\u0020-\u007e]{1,2048}$/)
+    .optional(),
+  authuser: z
+    .string()
+    .regex(/^\d{1,10}$/)
+    .optional(),
+  prompt: z
+    .string()
+    .regex(/^[A-Za-z0-9 _-]{1,128}$/)
+    .optional(),
+  iss: z.enum(["https://accounts.google.com", "accounts.google.com"]).optional(),
+} as const;
+
 export const ProviderCallbackQuerySchema = z.union([
-  z.strictObject({ code: OpaqueSecretSchema, state: OAuthStateSchema }),
+  z.strictObject({ code: OpaqueSecretSchema, state: OAuthStateSchema, ...CallbackMetadataSchema }),
   z.strictObject({
-    error: z.enum(["access_denied", "temporarily_unavailable", "server_error"]),
+    error: z.string().regex(/^[A-Za-z0-9._~-]{1,128}$/),
     state: OAuthStateSchema,
+    error_description: z.string().max(1024).optional(),
+    error_uri: z.url().max(2048).optional(),
   }),
 ]);
 
 export type TransactionStartRequest = z.infer<typeof TransactionStartRequestSchema>;
 export type TransactionStartResponse = z.infer<typeof TransactionStartResponseSchema>;
-export type TransactionStatusQuery = z.infer<typeof TransactionStatusQuerySchema>;
+export type TransactionStatusRequest = z.infer<typeof TransactionStatusRequestSchema>;
 export type TransactionStatusResponse = z.infer<typeof TransactionStatusResponseSchema>;
 export type TransactionRedeemRequest = z.infer<typeof TransactionRedeemRequestSchema>;
 export type SessionCredential = z.infer<typeof SessionCredentialSchema>;
