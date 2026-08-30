@@ -10,38 +10,41 @@ import {
 } from "../../src/http/router";
 
 const id = "550e8400-e29b-41d4-a716-446655440000";
+const transactionId = "t".repeat(43);
+const deviceId = "d".repeat(22);
+const pollingSecret = "p".repeat(43);
+const credential = `v1.${deviceId}.${"s".repeat(43)}`;
 const instant = "2026-08-30T12:00:00Z";
-const secret = "s".repeat(32);
 
 const validOutputs: Readonly<Record<RouteName, unknown>> = {
   healthLive: { status: "ok" },
   healthReady: { status: "ready" },
   signInStart: {
-    transaction_id: id,
+    transaction_id: transactionId,
     authorization_url: "https://accounts.example/authorize",
-    polling_secret: secret,
+    polling_secret: pollingSecret,
     expires_at: instant,
   },
   signInStatus: { status: "pending", expires_at: instant },
   signInRedeem: {
     session: {
-      credential: secret,
-      session_id: id,
+      credential,
+      session_id: deviceId,
       idle_expires_at: instant,
       absolute_expires_at: instant,
     },
   },
   connectStart: {
-    transaction_id: id,
+    transaction_id: transactionId,
     authorization_url: "https://accounts.example/authorize",
-    polling_secret: secret,
+    polling_secret: pollingSecret,
     expires_at: instant,
   },
   connectStatus: { status: "authorized", expires_at: instant },
   connectRedeem: { connection_id: id, status: "active" },
   session: {
     principal_id: id,
-    session_id: id,
+    session_id: deviceId,
     client_kind: "web",
     device_name: "Browser",
     created_at: instant,
@@ -138,19 +141,22 @@ describe("contract router", () => {
 
   it("rejects duplicate and unknown queries before invoking a handler", async () => {
     const route = createRouter(handlers());
-    const base = `/v1/sign-in/${id}/status`;
+    const base = `/v1/sign-in/${transactionId}/status`;
     expect(
       (
         await route(
           new Request(
-            `https://calendar.test${base}?polling_secret=${secret}&polling_secret=${secret}`,
+            `https://calendar.test${base}?polling_secret=${pollingSecret}&polling_secret=${pollingSecret}`,
           ),
         )
       ).status,
     ).toBe(400);
     expect(
-      (await route(new Request(`https://calendar.test${base}?polling_secret=${secret}&other=x`)))
-        .status,
+      (
+        await route(
+          new Request(`https://calendar.test${base}?polling_secret=${pollingSecret}&other=x`),
+        )
+      ).status,
     ).toBe(400);
   });
 
@@ -228,7 +234,7 @@ describe("contract router", () => {
 
   it("returns no body and privacy headers for destructive routes", async () => {
     const response = await createRouter(handlers())(
-      new Request(`https://calendar.test/v1/devices/${id}`, { method: "DELETE" }),
+      new Request(`https://calendar.test/v1/devices/${deviceId}`, { method: "DELETE" }),
     );
     expect(response.status).toBe(204);
     expect(await response.text()).toBe("");

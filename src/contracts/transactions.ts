@@ -3,13 +3,18 @@ import { z } from "zod";
 import {
   ClientKindSchema,
   DeviceNameSchema,
+  DeviceSessionIdSchema,
+  OAuthStateSchema,
   OpaqueSecretSchema,
+  PollingSecretSchema,
   Rfc3339InstantSchema,
+  ServiceCredentialSchema,
+  TransactionIdSchema,
   UrlSchema,
   UuidSchema,
 } from "./common";
 
-export const PkceChallengeSchema = z.string().regex(/^[A-Za-z0-9_-]{43,128}$/);
+export const PkceChallengeSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 export const PkceVerifierSchema = z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/);
 
 export const TransactionStartRequestSchema = z.strictObject({
@@ -19,14 +24,14 @@ export const TransactionStartRequestSchema = z.strictObject({
 });
 
 export const TransactionStartResponseSchema = z.strictObject({
-  transaction_id: UuidSchema,
+  transaction_id: TransactionIdSchema,
   authorization_url: UrlSchema,
-  polling_secret: OpaqueSecretSchema,
+  polling_secret: PollingSecretSchema,
   expires_at: Rfc3339InstantSchema,
 });
 
 export const TransactionStatusQuerySchema = z.strictObject({
-  polling_secret: OpaqueSecretSchema,
+  polling_secret: PollingSecretSchema,
 });
 
 export const TransactionStatusResponseSchema = z.discriminatedUnion("status", [
@@ -40,13 +45,13 @@ export const TransactionStatusResponseSchema = z.discriminatedUnion("status", [
 ]);
 
 export const TransactionRedeemRequestSchema = z.strictObject({
-  polling_secret: OpaqueSecretSchema,
+  polling_secret: PollingSecretSchema,
   code_verifier: PkceVerifierSchema,
 });
 
 export const SessionCredentialSchema = z.strictObject({
-  credential: OpaqueSecretSchema,
-  session_id: UuidSchema,
+  credential: ServiceCredentialSchema,
+  session_id: DeviceSessionIdSchema,
   idle_expires_at: Rfc3339InstantSchema,
   absolute_expires_at: Rfc3339InstantSchema,
 });
@@ -59,10 +64,10 @@ export const ConnectRedeemResponseSchema = z.strictObject({
 });
 
 export const ProviderCallbackQuerySchema = z.union([
-  z.strictObject({ code: OpaqueSecretSchema, state: OpaqueSecretSchema }),
+  z.strictObject({ code: OpaqueSecretSchema, state: OAuthStateSchema }),
   z.strictObject({
     error: z.enum(["access_denied", "temporarily_unavailable", "server_error"]),
-    state: OpaqueSecretSchema,
+    state: OAuthStateSchema,
   }),
 ]);
 

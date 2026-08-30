@@ -7,7 +7,18 @@ export const MAX_OPAQUE_SECRET_LENGTH = 1024;
 export const MAX_RANGE_DAYS = 93;
 
 export const UuidSchema = z.uuid();
-export const OpaqueSecretSchema = z.string().min(16).max(MAX_OPAQUE_SECRET_LENGTH);
+export const TransactionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const DeviceSessionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
+export const PollingSecretSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const ServiceCredentialSchema = z
+  .string()
+  .regex(/^v1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
+export const OAuthStateSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const OpaqueSecretSchema = z
+  .string()
+  .regex(/^[\u0021-\u007e]+$/)
+  .min(16)
+  .max(MAX_OPAQUE_SECRET_LENGTH);
 export const CursorSchema = z.string().min(16).max(MAX_CURSOR_LENGTH);
 export const ClientKindSchema = z.enum(CLIENT_KINDS);
 export const DeviceNameSchema = z.string().trim().min(1).max(80);

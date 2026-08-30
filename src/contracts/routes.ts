@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-import { EmptyObjectSchema, UuidSchema } from "./common";
+import {
+  DeviceSessionIdSchema,
+  EmptyObjectSchema,
+  TransactionIdSchema,
+  UuidSchema,
+} from "./common";
 import {
   CalendarsResponseSchema,
   ConnectionsResponseSchema,
@@ -59,7 +64,7 @@ export interface RouteDefinition {
 }
 
 const noParams = {} as const;
-const transactionParams = { transaction_id: UuidSchema } as const;
+const transactionParams = { transaction_id: TransactionIdSchema } as const;
 
 export const routes: readonly RouteDefinition[] = [
   {
@@ -211,7 +216,7 @@ export const routes: readonly RouteDefinition[] = [
     path: "/v1/devices/{device_id}",
     authenticated: true,
     query: EmptyObjectSchema,
-    params: { device_id: UuidSchema },
+    params: { device_id: DeviceSessionIdSchema },
     successStatus: 204,
   },
   {

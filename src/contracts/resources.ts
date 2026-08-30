@@ -5,6 +5,7 @@ import {
   CursorSchema,
   DateSchema,
   DeviceNameSchema,
+  DeviceSessionIdSchema,
   isBoundedEventRange,
   Rfc3339InstantSchema,
   UuidSchema,
@@ -12,7 +13,7 @@ import {
 
 export const SessionSchema = z.strictObject({
   principal_id: UuidSchema,
-  session_id: UuidSchema,
+  session_id: DeviceSessionIdSchema,
   client_kind: ClientKindSchema,
   device_name: DeviceNameSchema,
   created_at: Rfc3339InstantSchema,
@@ -94,7 +95,7 @@ export const EventsResponseSchema = z.strictObject({
 });
 
 export const DeviceSchema = z.strictObject({
-  id: UuidSchema,
+  id: DeviceSessionIdSchema,
   client_kind: ClientKindSchema,
   device_name: DeviceNameSchema,
   created_at: Rfc3339InstantSchema,

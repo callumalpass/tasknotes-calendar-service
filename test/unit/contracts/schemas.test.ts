@@ -32,6 +32,9 @@ describe("public contract schemas", () => {
     };
     expect(TransactionStartRequestSchema.safeParse(valid).success).toBe(true);
     expect(
+      TransactionStartRequestSchema.safeParse({ ...valid, code_challenge: "a".repeat(44) }).success,
+    ).toBe(false);
+    expect(
       TransactionStartRequestSchema.safeParse({ ...valid, client_kind: "desktop" }).success,
     ).toBe(false);
     expect(
@@ -80,7 +83,7 @@ describe("public contract schemas", () => {
   });
 
   it("accepts exactly a provider success or bounded provider error callback", () => {
-    const state = "s".repeat(32);
+    const state = "s".repeat(43);
     expect(ProviderCallbackQuerySchema.safeParse({ code: "c".repeat(32), state }).success).toBe(
       true,
     );

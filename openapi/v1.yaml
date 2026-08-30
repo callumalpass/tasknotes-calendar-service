@@ -248,7 +248,7 @@ paths:
             name: state,
             in: query,
             required: true,
-            schema: { type: string, minLength: 16, maxLength: 1024 },
+            schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" },
           }
         - {
             name: code,
@@ -297,18 +297,29 @@ components:
     RetryAfter: { schema: { type: integer, minimum: 1, maximum: 300 } }
   parameters:
     TransactionId:
-      { name: transaction_id, in: path, required: true, schema: { type: string, format: uuid } }
+      {
+        name: transaction_id,
+        in: path,
+        required: true,
+        schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" },
+      }
     ConnectionId:
       { name: connection_id, in: path, required: true, schema: { type: string, format: uuid } }
     CalendarId:
       { name: calendar_id, in: path, required: true, schema: { type: string, format: uuid } }
-    DeviceId: { name: device_id, in: path, required: true, schema: { type: string, format: uuid } }
+    DeviceId:
+      {
+        name: device_id,
+        in: path,
+        required: true,
+        schema: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" },
+      }
     PollingSecret:
       {
         name: polling_secret,
         in: query,
         required: true,
-        schema: { type: string, minLength: 16, maxLength: 1024 },
+        schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" },
       }
   requestBodies:
     TransactionStart:
@@ -352,22 +363,22 @@ components:
       properties:
         client_kind: { $ref: "#/components/schemas/ClientKind" }
         device_name: { type: string, minLength: 1, maxLength: 80 }
-        code_challenge: { type: string, pattern: "^[A-Za-z0-9_-]{43,128}$" }
+        code_challenge: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
     TransactionStartResponse:
       type: object
       additionalProperties: false
       required: [transaction_id, authorization_url, polling_secret, expires_at]
       properties:
-        transaction_id: { type: string, format: uuid }
+        transaction_id: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
         authorization_url: { type: string, format: uri, maxLength: 2048 }
-        polling_secret: { type: string, minLength: 16, maxLength: 1024 }
+        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
         expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     TransactionRedeemRequest:
       type: object
       additionalProperties: false
       required: [polling_secret, code_verifier]
       properties:
-        polling_secret: { type: string, minLength: 16, maxLength: 1024 }
+        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
         code_verifier: { type: string, pattern: "^[A-Za-z0-9._~-]{43,128}$" }
     TransactionStatus:
       oneOf:
@@ -413,8 +424,8 @@ components:
       additionalProperties: false
       required: [credential, session_id, idle_expires_at, absolute_expires_at]
       properties:
-        credential: { type: string, minLength: 16, maxLength: 1024 }
-        session_id: { type: string, format: uuid }
+        credential: { type: string, pattern: "^v1\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}$" }
+        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     SignInRedeemResponse:
@@ -442,7 +453,7 @@ components:
         ]
       properties:
         principal_id: { type: string, format: uuid }
-        session_id: { type: string, format: uuid }
+        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
         client_kind: { $ref: "#/components/schemas/ClientKind" }
         device_name: { type: string, minLength: 1, maxLength: 80 }
         created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
@@ -508,7 +519,7 @@ components:
       additionalProperties: false
       required: [id, client_kind, device_name, created_at, last_used_at, current]
       properties:
-        id: { type: string, format: uuid }
+        id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
         client_kind: { $ref: "#/components/schemas/ClientKind" }
         device_name: { type: string, minLength: 1, maxLength: 80 }
         created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
