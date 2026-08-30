@@ -26,6 +26,8 @@ const context: TokenEnvelopeContext = {
   provider: "google",
   principalId: "principal-1",
   connectionId: "connection-1",
+  connectionGeneration: 3,
+  tokenVersion: 7,
   tokenKind: "google_oauth",
 };
 const key1 = Uint8Array.from({ length: 32 }, (_, index) => index);
@@ -139,6 +141,8 @@ describe("token envelopes", () => {
     ["provider", "microsoft"],
     ["principalId", "principal-2"],
     ["connectionId", "connection-2"],
+    ["connectionGeneration", 4],
+    ["tokenVersion", 8],
     ["tokenKind", "provider_pkce"],
   ] as const)("binds the %s AAD component", async (component, replacement) => {
     const envelope = await makeEnvelope();
@@ -175,6 +179,8 @@ describe("token envelopes", () => {
         provider: context.provider,
         principalId: context.principalId,
         connectionId: context.connectionId,
+        connectionGeneration: context.connectionGeneration,
+        tokenVersion: context.tokenVersion,
         tokenKind: context.tokenKind,
         schemaVersion: 1,
         purpose: "payload",
@@ -204,6 +210,12 @@ describe("token envelopes", () => {
       encryptTokenEnvelope(payload, { ...context, principalId: "" }, keyring1),
     ).rejects.toBeInstanceOf(TokenEnvelopeError);
     await expect(
+      encryptTokenEnvelope(payload, { ...context, connectionGeneration: 0 }, keyring1),
+    ).rejects.toBeInstanceOf(TokenEnvelopeError);
+    await expect(
+      encryptTokenEnvelope(payload, { ...context, tokenVersion: 0 }, keyring1),
+    ).rejects.toBeInstanceOf(TokenEnvelopeError);
+    await expect(
       encryptTokenEnvelope(payload, context, {
         activeVersion: 1,
         keys: new Map([[1, new Uint8Array(31)]]),
@@ -211,6 +223,20 @@ describe("token envelopes", () => {
     ).rejects.toBeInstanceOf(TokenEnvelopeError);
     await expect(
       encryptTokenEnvelope(payload, context, keyring1, { bytes: () => new Uint8Array(1) }),
+    ).rejects.toBeInstanceOf(TokenEnvelopeError);
+  });
+
+  it("rejects escape-expanded payloads that cannot produce a decryptable envelope", async () => {
+    await expect(
+      encryptTokenEnvelope(
+        {
+          ...payload,
+          accessToken: String.fromCharCode(0).repeat(16_000),
+          refreshToken: String.fromCharCode(0).repeat(16_000),
+        },
+        context,
+        keyring1,
+      ),
     ).rejects.toBeInstanceOf(TokenEnvelopeError);
   });
 

@@ -91,6 +91,7 @@ describe("event cursors", () => {
   it.each([
     ["empty page token", "", BINDING, NOW, KEY],
     ["oversized page token", "x".repeat(2049), BINDING, NOW, KEY],
+    ["escape-expanded page token", String.fromCharCode(0).repeat(2048), BINDING, NOW, KEY],
     ["invalid generation", "page", { ...BINDING, connectionGeneration: 0 }, NOW, KEY],
     ["invalid time", "page", BINDING, -1, KEY],
     ["short key", "page", BINDING, NOW, KEY.subarray(0, 31)],

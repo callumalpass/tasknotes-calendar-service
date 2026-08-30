@@ -8,6 +8,7 @@ const GCM_IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 const MAX_TOKEN_BYTES = 16_384;
 const MAX_PAYLOAD_CIPHERTEXT_BYTES = 65_536;
+const MAX_PAYLOAD_PLAINTEXT_BYTES = MAX_PAYLOAD_CIPHERTEXT_BYTES - GCM_TAG_BYTES;
 const MAX_SCOPES = 100;
 const MAX_SCOPE_BYTES = 256;
 
@@ -26,6 +27,8 @@ export interface TokenEnvelopeContext {
   readonly provider: "google";
   readonly principalId: string;
   readonly connectionId: string;
+  readonly connectionGeneration: number;
+  readonly tokenVersion: number;
   readonly tokenKind: string;
 }
 
@@ -85,6 +88,12 @@ function validateContext(context: TokenEnvelopeContext): void {
   }
   assertBoundedString(context.principalId, "principalId", 256);
   assertBoundedString(context.connectionId, "connectionId", 256);
+  if (!Number.isSafeInteger(context.connectionGeneration) || context.connectionGeneration < 1) {
+    throw new TypeError("connectionGeneration is invalid");
+  }
+  if (!Number.isSafeInteger(context.tokenVersion) || context.tokenVersion < 1) {
+    throw new TypeError("tokenVersion is invalid");
+  }
   assertBoundedString(context.tokenKind, "tokenKind", 64);
 }
 
@@ -175,6 +184,8 @@ function associatedData(
     provider: context.provider,
     principalId: context.principalId,
     connectionId: context.connectionId,
+    connectionGeneration: context.connectionGeneration,
+    tokenVersion: context.tokenVersion,
     tokenKind: context.tokenKind,
     schemaVersion: ENVELOPE_SCHEMA_VERSION,
     purpose,
@@ -306,9 +317,13 @@ export async function encryptTokenEnvelope(
       dekIv,
       associatedData(context, "dek", keyVersion),
     );
+    const serializedPayload = textEncoder.encode(JSON.stringify(validatedPayload));
+    if (serializedPayload.length > MAX_PAYLOAD_PLAINTEXT_BYTES) {
+      throw new TypeError("serialized token payload is too large");
+    }
     const ciphertext = await aesEncrypt(
       await importAesKey(dek),
-      textEncoder.encode(JSON.stringify(validatedPayload)),
+      serializedPayload,
       payloadIv,
       associatedData(context, "payload"),
     );

@@ -131,7 +131,11 @@ export async function sealEventCursor(
         asArrayBuffer(plaintext),
       ),
     );
-    return `c1.${encodeBase64Url(iv)}.${encodeBase64Url(ciphertext)}`;
+    const cursor = `c1.${encodeBase64Url(iv)}.${encodeBase64Url(ciphertext)}`;
+    if (cursor.length > MAX_CURSOR_BYTES) {
+      throw new TypeError("serialized cursor is too large");
+    }
+    return cursor;
   } catch {
     throw new CursorError();
   }
