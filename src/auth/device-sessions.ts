@@ -4,6 +4,7 @@ import { randomBytes } from "../crypto/random";
 import type { RandomByteSource } from "../crypto/random";
 import { isDeviceClientKind, isValidDeviceName } from "../domain/device";
 import type { DeviceClientKind } from "../domain/device";
+import { parseServiceCredential } from "../domain/service-credential";
 
 export type { DeviceClientKind } from "../domain/device";
 
@@ -197,30 +198,6 @@ async function generateCredential(
   };
 }
 
-function parseCredential(credential: string): { sessionId: Uint8Array; secret: Uint8Array } | null {
-  if (credential.length > 80) {
-    return null;
-  }
-  const parts = credential.split(".");
-  if (parts.length !== 3 || parts[0] !== CREDENTIAL_VERSION) {
-    return null;
-  }
-  try {
-    return {
-      sessionId: decodeBase64Url(parts[1] ?? "", {
-        minBytes: SESSION_ID_BYTES,
-        maxBytes: SESSION_ID_BYTES,
-      }),
-      secret: decodeBase64Url(parts[2] ?? "", {
-        minBytes: CREDENTIAL_SECRET_BYTES,
-        maxBytes: CREDENTIAL_SECRET_BYTES,
-      }),
-    };
-  } catch {
-    return null;
-  }
-}
-
 function metadata(row: MetadataRow | SessionRow): DeviceSessionMetadata {
   if (!isDeviceClientKind(row.client_kind)) {
     throw new Error("stored device session has an invalid client kind");
@@ -396,7 +373,7 @@ export class DeviceSessions {
     if (typeof credential !== "string") {
       return null;
     }
-    const parsed = parseCredential(credential);
+    const parsed = parseServiceCredential(credential);
     if (parsed === null) {
       return null;
     }

@@ -462,7 +462,11 @@ components:
       additionalProperties: false
       required: [credential, session_id, idle_expires_at, absolute_expires_at]
       properties:
-        credential: { type: string, pattern: "^v1\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}$" }
+        credential:
+          {
+            type: string,
+            pattern: "^v1\\.[A-Za-z0-9_-]{21}[AQgw]\\.[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$",
+          }
         session_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }

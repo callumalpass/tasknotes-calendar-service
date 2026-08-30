@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { DEVICE_CLIENT_KINDS, isValidDeviceName } from "../domain/device";
+import { isServiceCredential } from "../domain/service-credential";
 
 export const CLIENT_KINDS = DEVICE_CLIENT_KINDS;
 export const MAX_JSON_BODY_BYTES = 16 * 1024;
@@ -12,9 +13,7 @@ export const UuidSchema = z.uuid();
 export const TransactionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 export const DeviceSessionIdSchema = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
 export const PollingSecretSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
-export const ServiceCredentialSchema = z
-  .string()
-  .regex(/^v1\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
+export const ServiceCredentialSchema = z.string().refine(isServiceCredential);
 export const OAuthStateSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 export const OpaqueSecretSchema = z
   .string()

@@ -289,7 +289,11 @@ describe("contract router", () => {
       const handler = vi.fn(() => Promise.resolve(validOutputs[name]));
       const route = router(handlers({ [name]: handler }), { authenticate });
 
-      for (const authorization of [undefined, "bearer not-a-service-credential"]) {
+      for (const authorization of [
+        undefined,
+        "bearer not-a-service-credential",
+        `Bearer ${credential.replace(/8$/, "9")}`,
+      ]) {
         const request = malformedRequest();
         if (authorization !== undefined) request.headers.set("authorization", authorization);
         const response = await route(request);
@@ -304,9 +308,9 @@ describe("contract router", () => {
 
   it("returns the same generic 401 for wrong, revoked, and expired credentials", async () => {
     const rejectedCredentials = [
-      credential.replace(/8$/, "9"),
       credential.replace(/8$/, "A"),
-      credential.replace(/8$/, "B"),
+      credential.replace(/8$/, "E"),
+      credential.replace(/8$/, "I"),
     ];
     const authenticate = vi.fn(() => Promise.resolve(null));
     const handler = vi.fn(() => Promise.resolve(validOutputs.session));

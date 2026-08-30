@@ -247,6 +247,7 @@ describe("device sessions against migrated D1", () => {
       `v1.${id}`,
       `v1.${id}.${secret}.extra`,
       `v1.${id}.${secret}=`,
+      `v1.${id}.${secret?.replace(/.$/u, "B")}`,
       `v1.${id}.short`,
       `v1.short.${secret}`,
       `v1.${id}.${"a".repeat(10_000)}`,
