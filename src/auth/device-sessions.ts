@@ -2,6 +2,10 @@ import { decodeBase64Url, encodeBase64Url } from "../crypto/base64url";
 import { constantTimeEqual } from "../crypto/digest";
 import { randomBytes } from "../crypto/random";
 import type { RandomByteSource } from "../crypto/random";
+import { isDeviceClientKind, isValidDeviceName } from "../domain/device";
+import type { DeviceClientKind } from "../domain/device";
+
+export type { DeviceClientKind } from "../domain/device";
 
 const CREDENTIAL_VERSION = "v1";
 const SESSION_ID_BYTES = 16;
@@ -10,12 +14,8 @@ const DIGEST_BYTES = 32;
 const IDLE_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
 const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
 const LAST_USED_UPDATE_INTERVAL_SECONDS = 60 * 60;
-const MAX_DEVICE_NAME_BYTES = 128;
 const MAX_PRINCIPAL_ID_BYTES = 256;
-const CLIENT_KINDS = ["web", "ios", "android", "obsidian"] as const;
 const textEncoder = new TextEncoder();
-
-export type DeviceClientKind = (typeof CLIENT_KINDS)[number];
 
 export interface Clock {
   now(): Date;
@@ -123,7 +123,8 @@ function toIso(epochSeconds: number): string {
   return new Date(epochSeconds * 1_000).toISOString();
 }
 
-function isBoundedIdentifier(value: string, maximumBytes: number): boolean {
+function isBoundedIdentifier(value: unknown, maximumBytes: number): value is string {
+  if (typeof value !== "string") return false;
   const hasControlCharacter = Array.from(value).some((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint <= 0x1f || codePoint === 0x7f;
@@ -146,11 +147,7 @@ function validateDevice(
   deviceName: string,
   clientKind: string,
 ): asserts clientKind is DeviceClientKind {
-  if (
-    !isBoundedIdentifier(deviceName, MAX_DEVICE_NAME_BYTES) ||
-    deviceName.trim() !== deviceName ||
-    !CLIENT_KINDS.some((candidate) => candidate === clientKind)
-  ) {
+  if (!isValidDeviceName(deviceName) || !isDeviceClientKind(clientKind)) {
     throw new DeviceSessionInputError();
   }
 }
@@ -224,12 +221,8 @@ function parseCredential(credential: string): { sessionId: Uint8Array; secret: U
   }
 }
 
-function isClientKind(value: string): value is DeviceClientKind {
-  return CLIENT_KINDS.some((candidate) => candidate === value);
-}
-
 function metadata(row: MetadataRow | SessionRow): DeviceSessionMetadata {
-  if (!isClientKind(row.client_kind)) {
+  if (!isDeviceClientKind(row.client_kind)) {
     throw new Error("stored device session has an invalid client kind");
   }
   return {
@@ -309,6 +302,13 @@ export class DeviceSessions {
   public async redeemSignInTransaction(
     input: RedeemSignInTransactionInput,
   ): Promise<CreatedDeviceSession | null> {
+    if (
+      !isBoundedIdentifier(input.transactionId, 256) ||
+      !isBoundedIdentifier(input.expectedPollingDigest, 256) ||
+      !isBoundedIdentifier(input.expectedTasknotesPkceChallenge, 128)
+    ) {
+      throw new DeviceSessionInputError();
+    }
     const now = validatedNow(this.#clock);
     const generated = await generateCredential(this.#pepper, this.#random);
     const idleExpiresAt = now + IDLE_LIFETIME_SECONDS;

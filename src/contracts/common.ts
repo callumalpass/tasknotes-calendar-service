@@ -1,6 +1,8 @@
 import { z } from "zod";
 
-export const CLIENT_KINDS = ["web", "ios", "android", "obsidian"] as const;
+import { DEVICE_CLIENT_KINDS, isValidDeviceName } from "../domain/device";
+
+export const CLIENT_KINDS = DEVICE_CLIENT_KINDS;
 export const MAX_JSON_BODY_BYTES = 16 * 1024;
 export const MAX_CURSOR_LENGTH = 2048;
 export const MAX_OPAQUE_SECRET_LENGTH = 1024;
@@ -21,7 +23,7 @@ export const OpaqueSecretSchema = z
   .max(MAX_OPAQUE_SECRET_LENGTH);
 export const CursorSchema = z.string().min(16).max(MAX_CURSOR_LENGTH);
 export const ClientKindSchema = z.enum(CLIENT_KINDS);
-export const DeviceNameSchema = z.string().trim().min(1).max(80);
+export const DeviceNameSchema = z.string().refine(isValidDeviceName);
 export const Rfc3339InstantSchema = z.iso.datetime({ offset: true });
 export const DateSchema = z.iso.date();
 export const UrlSchema = z.url().max(2048);

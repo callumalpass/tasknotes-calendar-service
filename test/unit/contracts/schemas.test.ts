@@ -43,6 +43,16 @@ describe("public contract schemas", () => {
     expect(
       TransactionStartRequestSchema.safeParse({ ...valid, device_name: " ".repeat(81) }).success,
     ).toBe(false);
+    expect(
+      TransactionStartRequestSchema.safeParse({ ...valid, device_name: "😀".repeat(32) }).success,
+    ).toBe(true);
+    expect(
+      TransactionStartRequestSchema.safeParse({ ...valid, device_name: "😀".repeat(33) }).success,
+    ).toBe(false);
+    expect(
+      TransactionStartRequestSchema.safeParse({ ...valid, device_name: "Work\u0000laptop" })
+        .success,
+    ).toBe(false);
   });
 
   it("requires RFC3339 instants, increasing ranges, and at most 93 days", () => {

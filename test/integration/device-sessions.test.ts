@@ -546,6 +546,23 @@ describe("device sessions against migrated D1", () => {
     ).resolves.toBe(0);
   });
 
+  it("rejects malformed redemption bindings before querying D1", async () => {
+    const valid = {
+      transactionId: "transaction-input",
+      expectedPollingDigest: "poll-transaction-input",
+      expectedTasknotesPkceChallenge: "challenge-transaction-input",
+    } as const;
+    for (const input of [
+      { ...valid, transactionId: "x".repeat(257) },
+      { ...valid, expectedPollingDigest: "poll\u0000digest" },
+      { ...valid, expectedTasknotesPkceChallenge: "x".repeat(129) },
+    ]) {
+      await expect(sessions.redeemSignInTransaction(input)).rejects.toBeInstanceOf(
+        DeviceSessionInputError,
+      );
+    }
+  });
+
   it("does not mint a replacement after a committed response is lost", async () => {
     await addPrincipal("principal-a");
     await addGoogleIdentity("identity-a", "principal-a", "subject-a");

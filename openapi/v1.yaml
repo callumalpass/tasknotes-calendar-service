@@ -389,7 +389,12 @@ components:
       required: [client_kind, device_name, code_challenge]
       properties:
         client_kind: { $ref: "#/components/schemas/ClientKind" }
-        device_name: { type: string, minLength: 1, maxLength: 80 }
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Trimmed, control-character-free, and at most 128 UTF-8 bytes.
+          x-max-utf8-bytes: 128
         code_challenge: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
     TransactionStartResponse:
       type: object
@@ -488,7 +493,12 @@ components:
         principal_id: { type: string, format: uuid }
         session_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
         client_kind: { $ref: "#/components/schemas/ClientKind" }
-        device_name: { type: string, minLength: 1, maxLength: 80 }
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Trimmed, control-character-free, and at most 128 UTF-8 bytes.
+          x-max-utf8-bytes: 128
         created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
@@ -554,7 +564,12 @@ components:
       properties:
         id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
         client_kind: { $ref: "#/components/schemas/ClientKind" }
-        device_name: { type: string, minLength: 1, maxLength: 80 }
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Trimmed, control-character-free, and at most 128 UTF-8 bytes.
+          x-max-utf8-bytes: 128
         created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         last_used_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         current: { type: boolean }
