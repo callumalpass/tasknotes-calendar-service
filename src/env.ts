@@ -13,4 +13,5 @@ export interface Env {
   SESSION_PEPPER: string;
   IDENTITY_FENCE_KEY: string;
   CURSOR_KEY: string;
+  EVENT_ID_KEY_V1: string;
 }

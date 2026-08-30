@@ -41,6 +41,20 @@ describe("OpenAPI and runtime contract", () => {
     expect(spec).toContain(`enum: [${CLIENT_KINDS.join(", ")}]`);
   });
 
+  it("documents the strict status union, opaque recurrence IDs, and tombstone pair variants", () => {
+    expect(spec).toMatch(
+      /Event:\n(?:.|\n)*?oneOf:\n\s+- \$ref: "#\/components\/schemas\/ConfirmedEvent"\n\s+- \$ref: "#\/components\/schemas\/TentativeEvent"\n\s+- \$ref: "#\/components\/schemas\/CancelledEvent"/u,
+    );
+    expect(spec).toContain("CancelledEventWithInterval");
+    expect(spec).toContain("CancelledEventWithoutInterval");
+    expect(spec).toContain("required: [series_id, original_start]");
+    expect(spec).toContain("Opaque deterministic event identifier.");
+    expect(spec).toContain("Opaque deterministic series identifier.");
+    expect(spec).toContain("all-day end date is preserved exactly from Google");
+    expect(spec).toContain("is exclusive");
+    expect(spec).toContain("present interval increases strictly");
+  });
+
   it("documents strict objects, UUID locators, one-calendar reads, and no write surface", () => {
     expect(spec).toContain("additionalProperties: false");
     expect(spec).toContain("format: uuid");

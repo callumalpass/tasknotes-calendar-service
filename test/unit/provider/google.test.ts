@@ -57,6 +57,7 @@ const calendar = {
 const timedEvent = {
   id: "event-1",
   status: "confirmed",
+  updated: "2026-03-28T12:34:56.123Z",
   summary: "DST boundary",
   description: "description",
   location: "location",
@@ -270,7 +271,7 @@ describe("Google provider HTTP boundary", () => {
     expect(requested?.searchParams.get("showDeleted")).toBe("true");
     expect(requested?.searchParams.get("orderBy")).toBe("startTime");
     expect(requested?.searchParams.get("fields")).toBe(
-      "nextPageToken,items(id,status,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
+      "nextPageToken,items(id,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
     );
     for (const excluded of [
       "attendees",
@@ -287,6 +288,7 @@ describe("Google provider HTTP boundary", () => {
     expect(result.value.items[0]).toEqual({
       id: "event-1",
       status: "confirmed",
+      updatedAt: "2026-03-28T12:34:56.123Z",
       title: "DST boundary",
       description: "description",
       location: "location",
@@ -317,12 +319,14 @@ describe("Google provider HTTP boundary", () => {
             {
               id: "all-day",
               status: "tentative",
+              updated: "2024-02-28T20:00:00Z",
               start: { date: "2024-02-29" },
               end: { date: "2024-03-02" },
             },
             {
               id: "cancelled-instance",
               status: "cancelled",
+              updated: "2026-03-11T12:00:00Z",
               recurringEventId: "opaque-series-id",
               originalStartTime: {
                 dateTime: "2026-03-10T09:00:00-04:00",
@@ -344,17 +348,42 @@ describe("Google provider HTTP boundary", () => {
           },
           {
             status: "cancelled",
-            recurringEventId: "opaque-series-id",
-            originalStart: {
-              kind: "timed",
-              dateTime: "2026-03-10T09:00:00-04:00",
-              timeZone: "America/New_York",
+            recurrence: {
+              seriesId: "opaque-series-id",
+              originalStart: {
+                kind: "timed",
+                dateTime: "2026-03-10T09:00:00-04:00",
+                timeZone: "America/New_York",
+              },
             },
           },
         ],
       },
     });
   });
+
+  it.each([undefined, "", "not-an-instant", "2026-02-30T00:00:00Z"])(
+    "rejects missing or malformed required updated values",
+    async (updated) => {
+      const result = await listGoogleEventsPage({
+        ...eventsRequest,
+        fetch: fakeFetch(() =>
+          json({
+            items: [
+              {
+                id: "bad-updated",
+                status: "confirmed",
+                ...(updated === undefined ? {} : { updated }),
+                start: { dateTime: "2026-03-10T13:00:00Z" },
+                end: { dateTime: "2026-03-10T14:00:00Z" },
+              },
+            ],
+          }),
+        ),
+      });
+      expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    },
+  );
 
   it.each([
     {
@@ -372,6 +401,7 @@ describe("Google provider HTTP boundary", () => {
             {
               id: "bad-instance",
               status: "confirmed",
+              updated: "2026-03-09T12:00:00Z",
               start: { dateTime: "2026-03-10T13:00:00Z" },
               end: { dateTime: "2026-03-10T14:00:00Z" },
               ...recurrence,
@@ -385,6 +415,7 @@ describe("Google provider HTTP boundary", () => {
 
   it.each([
     [{ date: "2026-03-01", dateTime: "2026-03-01T00:00:00Z" }, { date: "2026-03-02" }],
+    [{ date: "2026-03-01" }, { date: "2026-03-01" }],
     [{ date: "2026-02-30" }, { date: "2026-03-02" }],
     [{ date: "2026-03-01", timeZone: "UTC" }, { date: "2026-03-02" }],
     [{ dateTime: "2026-03-01T00:00:00" }, { dateTime: "2026-03-01T01:00:00Z" }],
@@ -401,12 +432,60 @@ describe("Google provider HTTP boundary", () => {
   ])("rejects malformed or conflicting date boundaries", async (start, end) => {
     const result = await listGoogleEventsPage({
       ...eventsRequest,
-      fetch: fakeFetch(() => json({ items: [{ id: "bad", status: "confirmed", start, end }] })),
+      fetch: fakeFetch(() =>
+        json({
+          items: [{ id: "bad", status: "confirmed", updated: "2026-03-01T00:00:00Z", start, end }],
+        }),
+      ),
     });
     expect(result).toEqual({
       ok: false,
       error: { code: "invalid_response", message: "Provider returned an invalid response." },
     });
+  });
+
+  it.each([{ start: { date: "2026-03-10" } }, { end: { date: "2026-03-11" } }])(
+    "rejects one-sided cancelled intervals",
+    async (boundaries) => {
+      const result = await listGoogleEventsPage({
+        ...eventsRequest,
+        fetch: fakeFetch(() =>
+          json({
+            items: [
+              {
+                id: "one-sided-cancellation",
+                status: "cancelled",
+                updated: "2026-03-12T00:00:00Z",
+                ...boundaries,
+              },
+            ],
+          }),
+        ),
+      });
+      expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    },
+  );
+
+  it("rejects recurrence original-start kinds that conflict with a present interval", async () => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            {
+              id: "kind-conflict",
+              status: "cancelled",
+              updated: "2026-03-12T00:00:00Z",
+              start: { date: "2026-03-10" },
+              end: { date: "2026-03-11" },
+              recurringEventId: "series",
+              originalStartTime: { dateTime: "2026-03-10T00:00:00Z" },
+            },
+          ],
+        }),
+      ),
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
   });
 
   it("rejects event ranges beyond the server-owned 93-day bound before fetch", async () => {

@@ -77,10 +77,8 @@ calendar UUID and one bounded range per request. Initial bounds are 93 days, 250
 provider page per Worker request. Continuation cursors are opaque, authenticated, expire after ten
 minutes, and bind principal, connection generation, calendar, range, and provider page token.
 
-A private 60-second D1 read-through cache may store normalized response pages. It is keyed by
-principal and authorization generation and is never served stale after provider failure.
-Authenticated responses are `private, no-store`; the D1 cache is an application optimization, not an
-HTTP shared cache.
+Event pages are normalized directly from each bounded provider response. The first slice has no
+event mirror, event mapping table, or event cache. Authenticated responses are `private, no-store`.
 
 Event titles, descriptions, locations, attendee data, conference links, and raw provider responses
 never enter telemetry. The first public event shape excludes attendees, organizers, conference

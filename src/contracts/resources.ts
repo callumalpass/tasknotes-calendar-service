@@ -73,20 +73,85 @@ export const EventBoundarySchema = z.discriminatedUnion("kind", [
   AllDayBoundarySchema,
 ]);
 
+const EventRecurrenceSchema = z.strictObject({
+  series_id: UuidSchema,
+  original_start: EventBoundarySchema,
+});
+
+function eventTextSchema(maximumCharacters: number) {
+  return z
+    .string()
+    .max(maximumCharacters * 2)
+    .refine((value) => Array.from(value).length <= maximumCharacters);
+}
+
+const eventCommonShape = {
+  id: UuidSchema,
+  calendar_id: UuidSchema,
+  title: eventTextSchema(1000).nullable(),
+  description: eventTextSchema(16_000).nullable(),
+  location: eventTextSchema(1000).nullable(),
+  updated_at: Rfc3339InstantSchema,
+  recurrence: EventRecurrenceSchema.nullable(),
+} as const;
+
+const ConfirmedEventSchema = z.strictObject({
+  ...eventCommonShape,
+  status: z.literal("confirmed"),
+  start: EventBoundarySchema,
+  end: EventBoundarySchema,
+});
+
+const TentativeEventSchema = z.strictObject({
+  ...eventCommonShape,
+  status: z.literal("tentative"),
+  start: EventBoundarySchema,
+  end: EventBoundarySchema,
+});
+
+const CancelledEventSchema = z.strictObject({
+  ...eventCommonShape,
+  status: z.literal("cancelled"),
+  start: EventBoundarySchema.nullable(),
+  end: EventBoundarySchema.nullable(),
+});
+
+function boundaryPrecedes(
+  left: z.infer<typeof EventBoundarySchema>,
+  right: z.infer<typeof EventBoundarySchema>,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  return left.kind === "date"
+    ? left.date < (right as z.infer<typeof AllDayBoundarySchema>).date
+    : Date.parse(left.date_time) <
+        Date.parse((right as z.infer<typeof TimedBoundarySchema>).date_time);
+}
+
 export const EventSchema = z
-  .strictObject({
-    id: UuidSchema,
-    calendar_id: UuidSchema,
-    status: z.enum(["confirmed", "tentative", "cancelled"]),
-    title: z.string().max(1000).nullable(),
-    description: z.string().max(16_000).nullable(),
-    location: z.string().max(1000).nullable(),
-    start: EventBoundarySchema,
-    end: EventBoundarySchema,
-    updated_at: Rfc3339InstantSchema,
-  })
-  .refine((event) => event.start.kind === event.end.kind, {
-    message: "Event boundaries must use the same representation.",
+  .discriminatedUnion("status", [ConfirmedEventSchema, TentativeEventSchema, CancelledEventSchema])
+  .superRefine((event, context) => {
+    if ((event.start === null) !== (event.end === null)) {
+      context.addIssue({ code: "custom", message: "Cancelled boundaries must both be null." });
+      return;
+    }
+    if (event.start === null || event.end === null) return;
+    if (!boundaryPrecedes(event.start, event.end)) {
+      context.addIssue({
+        code: "custom",
+        message: "Event boundaries must have matching kinds and increase strictly.",
+      });
+      return;
+    }
+    if (
+      event.status !== "cancelled" &&
+      event.recurrence !== null &&
+      event.recurrence.original_start.kind !== event.start.kind
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Scheduled recurrence must use the event boundary kind.",
+      });
+    }
   });
 
 export const EventsResponseSchema = z.strictObject({

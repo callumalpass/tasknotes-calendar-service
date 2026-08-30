@@ -529,6 +529,9 @@ components:
         time_zone: { type: [string, "null"], maxLength: 100 }
         is_primary: { type: boolean }
     EventBoundary:
+      description:
+        A timed instant or an all-day date. An all-day end date is preserved exactly from Google and
+        is exclusive.
       oneOf:
         - {
             type: object,
@@ -547,20 +550,92 @@ components:
                 time_zone: { type: string, minLength: 1, maxLength: 100 },
               },
           }
-    Event:
+    EventRecurrence:
       type: object
       additionalProperties: false
-      required: [id, calendar_id, status, title, description, location, start, end, updated_at]
+      required: [series_id, original_start]
       properties:
-        id: { type: string, format: uuid }
-        calendar_id: { type: string, format: uuid }
-        status: { type: string, enum: [confirmed, tentative, cancelled] }
+        series_id:
+          { type: string, format: uuid, description: Opaque deterministic series identifier. }
+        original_start: { $ref: "#/components/schemas/EventBoundary" }
+    Event:
+      description:
+        Provider-neutral event with opaque deterministic identifiers. Boundary kinds match and every
+        present interval increases strictly.
+      oneOf:
+        - $ref: "#/components/schemas/ConfirmedEvent"
+        - $ref: "#/components/schemas/TentativeEvent"
+        - $ref: "#/components/schemas/CancelledEvent"
+      discriminator: { propertyName: status }
+    ConfirmedEvent:
+      type: object
+      additionalProperties: false
+      required:
+        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+      properties:
+        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
+        status: { const: confirmed }
         title: { type: [string, "null"], maxLength: 1000 }
         description: { type: [string, "null"], maxLength: 16000 }
         location: { type: [string, "null"], maxLength: 1000 }
         start: { $ref: "#/components/schemas/EventBoundary" }
         end: { $ref: "#/components/schemas/EventBoundary" }
         updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
+    TentativeEvent:
+      type: object
+      additionalProperties: false
+      required:
+        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+      properties:
+        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
+        status: { const: tentative }
+        title: { type: [string, "null"], maxLength: 1000 }
+        description: { type: [string, "null"], maxLength: 16000 }
+        location: { type: [string, "null"], maxLength: 1000 }
+        start: { $ref: "#/components/schemas/EventBoundary" }
+        end: { $ref: "#/components/schemas/EventBoundary" }
+        updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
+    CancelledEvent:
+      description: Tombstone with either a complete valid interval or two null boundaries.
+      oneOf:
+        - $ref: "#/components/schemas/CancelledEventWithInterval"
+        - $ref: "#/components/schemas/CancelledEventWithoutInterval"
+    CancelledEventWithInterval:
+      type: object
+      additionalProperties: false
+      required:
+        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+      properties:
+        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
+        status: { const: cancelled }
+        title: { type: [string, "null"], maxLength: 1000 }
+        description: { type: [string, "null"], maxLength: 16000 }
+        location: { type: [string, "null"], maxLength: 1000 }
+        start: { $ref: "#/components/schemas/EventBoundary" }
+        end: { $ref: "#/components/schemas/EventBoundary" }
+        updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
+    CancelledEventWithoutInterval:
+      type: object
+      additionalProperties: false
+      required:
+        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+      properties:
+        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
+        status: { const: cancelled }
+        title: { type: [string, "null"], maxLength: 1000 }
+        description: { type: [string, "null"], maxLength: 16000 }
+        location: { type: [string, "null"], maxLength: 1000 }
+        start: { type: "null" }
+        end: { type: "null" }
+        updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
     Device:
       type: object
       additionalProperties: false

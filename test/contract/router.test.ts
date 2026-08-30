@@ -484,6 +484,42 @@ describe("contract router", () => {
     ).toBe(200);
   });
 
+  it("validates event tombstones and contains invalid event handler output", async () => {
+    const path = `/v1/calendars/${id}/events?start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z`;
+    const tombstone = {
+      id,
+      calendar_id: id,
+      status: "cancelled",
+      title: null,
+      description: null,
+      location: null,
+      start: null,
+      end: null,
+      updated_at: instant,
+      recurrence: null,
+    };
+    const valid = await createRouter(
+      handlers({ events: () => Promise.resolve({ events: [tombstone], next_cursor: null }) }),
+    )(new Request(`https://calendar.test${path}`));
+    expect(valid.status).toBe(200);
+    await expect(valid.json()).resolves.toEqual({ events: [tombstone], next_cursor: null });
+
+    const invalid = await createRouter(
+      handlers({
+        events: () =>
+          Promise.resolve({
+            events: [{ ...tombstone, start: { kind: "date", date: "2026-01-01" } }],
+            next_cursor: null,
+          }),
+      }),
+    )(new Request(`https://calendar.test${path}`));
+    expect(invalid.status).toBe(500);
+    await expect(invalid.json()).resolves.toEqual({
+      code: "internal_error",
+      message: "An internal error occurred.",
+    });
+  });
+
   it("distinguishes malformed client input from handler invariant failures", async () => {
     const route = router(handlers({ healthLive: () => Promise.resolve({ status: "wrong" }) }));
     const internal = await route(new Request("https://calendar.test/health/live"));

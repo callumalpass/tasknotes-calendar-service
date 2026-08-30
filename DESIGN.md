@@ -26,11 +26,15 @@ recognize the account but never determines ownership or merging.
 
 The initial API overlays normalized external events in clients without writing them into TaskNotes
 records. Preserve provider IDs as opaque server-side mapping material. Normalize all-day and timed
-boundaries explicitly; do not silently invent timezone or recurrence semantics.
+boundaries explicitly; preserve all-day end dates as exclusive, and do not silently invent timezone
+or recurrence semantics. Text is never silently truncated: provider byte bounds are enforced first,
+and values outside the public contract's character bounds fail the page mapping. Public event and
+series identifiers are stateless keyed derivations scoped to the environment and
+authorization-resolved calendar.
 
 ## Data lifecycle
 
 Connection identity, encrypted tokens, device sessions, OAuth transactions, and revocation
-generations are durable security state. Event responses begin as live bounded reads with a short
-private read-through cache. Any later persistent cache remains disposable and is invalidated with
-its dependent cursor.
+generations are durable security state. Event responses are live bounded provider reads. The initial
+architecture has no event mirror, event mapping table, or event cache; introducing any retained
+event content requires a later accepted ADR.

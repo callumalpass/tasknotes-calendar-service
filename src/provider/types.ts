@@ -44,28 +44,43 @@ export interface ProviderTimedBoundary {
 
 export type ProviderEventBoundary = ProviderAllDayBoundary | ProviderTimedBoundary;
 
+export interface ProviderEventRecurrence {
+  readonly seriesId: string;
+  readonly originalStart: ProviderEventBoundary;
+}
+
 interface ProviderEventCommon {
   readonly id: string;
+  readonly updatedAt: string;
   readonly title?: string;
   readonly description?: string;
   readonly location?: string;
   readonly transparency: "opaque" | "transparent";
-  readonly recurringEventId?: string;
-  readonly originalStart?: ProviderEventBoundary;
+  readonly recurrence?: ProviderEventRecurrence;
 }
 
 export interface ProviderScheduledEvent extends ProviderEventCommon {
   readonly status: "confirmed" | "tentative";
   readonly start: ProviderEventBoundary;
-  /** Google all-day ends are preserved as exclusive dates. */
+  /** Google all-day end dates are preserved exactly and are exclusive. */
   readonly end: ProviderEventBoundary;
 }
 
-export interface ProviderCancelledEvent extends ProviderEventCommon {
+interface ProviderCancelledEventWithoutInterval extends ProviderEventCommon {
   readonly status: "cancelled";
-  /** Cancelled recurrence exceptions may contain only their original start. */
-  readonly start?: ProviderEventBoundary;
-  readonly end?: ProviderEventBoundary;
+  readonly start?: never;
+  readonly end?: never;
 }
+
+interface ProviderCancelledEventWithInterval extends ProviderEventCommon {
+  readonly status: "cancelled";
+  readonly start: ProviderEventBoundary;
+  /** Google all-day end dates are preserved exactly and are exclusive. */
+  readonly end: ProviderEventBoundary;
+}
+
+/** Google tombstones have either a complete interval or no interval. */
+export type ProviderCancelledEvent =
+  ProviderCancelledEventWithoutInterval | ProviderCancelledEventWithInterval;
 
 export type ProviderEvent = ProviderScheduledEvent | ProviderCancelledEvent;

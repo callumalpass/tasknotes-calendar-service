@@ -9,7 +9,8 @@
 | Encrypted provider PKCE verifier | Secret ciphertext   |                            Transaction lifetime | Context-bound; deleted at terminal cleanup                   |
 | Google token envelope            | Secret ciphertext   | Until disconnect/deletion/reconnect replacement | Application-layer AEAD; no plaintext fallback                |
 | Calendar metadata                | Personal            |          Until disconnect/deletion; refreshable | Raw provider calendar ID remains server-side                 |
-| Normalized event page cache      | Calendar content    |                                      60 seconds | Private, bounded, disposable; no stale serving               |
+| Live normalized event response   | Calendar content    |                                    Not retained | No event mirror, mapping table, or cache                     |
+| Event ID derivation key          | Secret              |    Environment lifetime; non-rotating by design | Dedicated key; compromise replacement changes all event IDs  |
 | Request/audit metadata           | Operational         |                               Define before LAB | Opaque internal IDs only; no email/event/provider token data |
 
 Retention values are implementation defaults, not permission to retain data in logs or backups.

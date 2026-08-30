@@ -12,7 +12,10 @@ export default defineConfig({
         configPath: "./wrangler.jsonc",
       },
       miniflare: {
-        bindings: { TEST_MIGRATIONS: migrations },
+        bindings: {
+          TEST_MIGRATIONS: migrations,
+          EVENT_ID_KEY_V1: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        },
       },
     }),
   ],

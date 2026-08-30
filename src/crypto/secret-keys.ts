@@ -18,6 +18,12 @@ export function decodeSecretKey(name: string, encoded: string): Uint8Array {
   }
 }
 
+export function eventIdKeyFromEnvironment(environment: {
+  readonly EVENT_ID_KEY_V1: string;
+}): Uint8Array {
+  return decodeSecretKey("EVENT_ID_KEY_V1", environment.EVENT_ID_KEY_V1);
+}
+
 export function tokenKeyringFromEnvironment(environment: {
   readonly TOKEN_KEK_V1: string;
 }): KeyEncryptionKeyring {

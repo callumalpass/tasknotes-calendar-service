@@ -19,7 +19,8 @@ encrypted in the service and never enter TaskNotes clients or mdbase collections
    is display text only.
 2. **One authority check.** Every object and provider operation is authorized from the current
    TaskNotes service principal before lookup or cache use.
-3. **Provider data remains authoritative.** Cached events are bounded, disposable derived data.
+3. **Provider data remains authoritative.** Event pages are bounded live reads and are not mirrored
+   or cached.
 4. **Revocation wins.** Disconnect and deletion immediately invalidate sessions and dominate delayed
    work.
 5. **Background work is explicit.** Webhooks, queues, cursors, and retries use versioned state

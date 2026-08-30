@@ -4,6 +4,7 @@ import { encodeBase64Url } from "../../../src/crypto/base64url";
 import {
   SecretConfigurationError,
   decodeSecretKey,
+  eventIdKeyFromEnvironment,
   tokenKeyringFromEnvironment,
 } from "../../../src/crypto/secret-keys";
 
@@ -28,6 +29,13 @@ describe("secret key configuration", () => {
       }
     },
   );
+
+  it("parses the dedicated non-rotating event ID key exactly once", () => {
+    expect(eventIdKeyFromEnvironment({ EVENT_ID_KEY_V1: encodeBase64Url(KEY) })).toEqual(KEY);
+    expect(() =>
+      eventIdKeyFromEnvironment({ EVENT_ID_KEY_V1: encodeBase64Url(KEY.subarray(1)) }),
+    ).toThrow(SecretConfigurationError);
+  });
 
   it("constructs the initial versioned token keyring", () => {
     const keyring = tokenKeyringFromEnvironment({ TOKEN_KEK_V1: encodeBase64Url(KEY) });

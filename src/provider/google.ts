@@ -565,6 +565,7 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
   if (!isRecord(value)) return undefined;
   const id = boundedString(value["id"], MAX_ID_BYTES);
   const status = value["status"];
+  const updatedAt = boundedString(value["updated"], 64);
   const hasStart = Object.hasOwn(value, "start");
   const hasEnd = Object.hasOwn(value, "end");
   const start = hasStart ? boundary(value["start"]) : undefined;
@@ -594,6 +595,8 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
         boundaryBefore(start, end);
   if (
     !id ||
+    !updatedAt ||
+    !validDateTime(updatedAt) ||
     (status !== "confirmed" && status !== "tentative" && status !== "cancelled") ||
     !validBoundaries ||
     title === null ||
@@ -602,17 +605,20 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
     !transparency ||
     (value["recurringEventId"] !== undefined && recurringEventId === undefined) ||
     (value["originalStartTime"] !== undefined && originalStart === undefined) ||
-    (originalStart === undefined) !== (recurringEventId === undefined)
+    (originalStart === undefined) !== (recurringEventId === undefined) ||
+    (originalStart !== undefined && start !== undefined && originalStart.kind !== start.kind)
   )
     return undefined;
   const common = {
     id,
+    updatedAt,
     transparency,
     ...(title === undefined ? {} : { title }),
     ...(description === undefined ? {} : { description }),
     ...(location === undefined ? {} : { location }),
-    ...(recurringEventId === undefined ? {} : { recurringEventId }),
-    ...(originalStart === undefined ? {} : { originalStart }),
+    ...(recurringEventId === undefined || originalStart === undefined
+      ? {}
+      : { recurrence: { seriesId: recurringEventId, originalStart } }),
   } as const;
   if (status === "cancelled") {
     return {
@@ -701,7 +707,7 @@ export async function listGoogleEventsPage(
   url.searchParams.set("timeMax", request.timeMax);
   url.searchParams.set(
     "fields",
-    "nextPageToken,items(id,status,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
+    "nextPageToken,items(id,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
   );
   if (!addPageToken(url, request.pageToken)) return invalidRequest();
   let headers: Headers;

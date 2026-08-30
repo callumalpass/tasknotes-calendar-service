@@ -20,6 +20,7 @@ function timedEvent() {
     start: { kind: "date_time", date_time: "2026-09-01T10:00:00Z" },
     end: { kind: "date_time", date_time: "2026-09-01T11:00:00Z" },
     updated_at: "2026-08-30T12:00:00Z",
+    recurrence: null,
   };
 }
 
@@ -84,12 +85,50 @@ describe("public contract schemas", () => {
     expect(EventsQuerySchema.safeParse({ ...range, calendar_id: id }).success).toBe(false);
   });
 
-  it("keeps all-day and timed boundaries explicit and consistent", () => {
+  it("enforces strict scheduled variants, ordered matching boundaries, and recurrence", () => {
     expect(EventSchema.safeParse(timedEvent()).success).toBe(true);
+    expect(EventSchema.safeParse({ ...timedEvent(), title: "😀".repeat(1000) }).success).toBe(true);
+    expect(EventSchema.safeParse({ ...timedEvent(), title: "😀".repeat(1001) }).success).toBe(
+      false,
+    );
+    for (const event of [
+      { ...timedEvent(), end: { kind: "date", date: "2026-09-02" } },
+      { ...timedEvent(), end: timedEvent().start },
+      { ...timedEvent(), start: timedEvent().end, end: timedEvent().start },
+      { ...timedEvent(), attendees: [] },
+      { ...timedEvent(), recurrence: undefined },
+      {
+        ...timedEvent(),
+        recurrence: { series_id: id, original_start: { kind: "date", date: "2026-09-01" } },
+      },
+      {
+        ...timedEvent(),
+        recurrence: { series_id: id, original_start: timedEvent().start, extra: true },
+      },
+    ]) {
+      expect(EventSchema.safeParse(event).success).toBe(false);
+    }
+  });
+
+  it("requires cancelled boundary pairs and validates every present interval", () => {
+    const tombstone = { ...timedEvent(), status: "cancelled", start: null, end: null };
+    expect(EventSchema.safeParse(tombstone).success).toBe(true);
+    expect(EventSchema.safeParse({ ...tombstone, start: timedEvent().start }).success).toBe(false);
+    expect(EventSchema.safeParse({ ...tombstone, end: timedEvent().end }).success).toBe(false);
     expect(
-      EventSchema.safeParse({ ...timedEvent(), end: { kind: "date", date: "2026-09-02" } }).success,
+      EventSchema.safeParse({
+        ...tombstone,
+        start: timedEvent().end,
+        end: timedEvent().start,
+      }).success,
     ).toBe(false);
-    expect(EventSchema.safeParse({ ...timedEvent(), attendees: [] }).success).toBe(false);
+    expect(
+      EventSchema.safeParse({
+        ...tombstone,
+        start: { kind: "date", date: "2024-02-29" },
+        end: { kind: "date", date: "2024-03-01" },
+      }).success,
+    ).toBe(true);
   });
 
   it("accepts exactly a provider success or bounded provider error callback", () => {
