@@ -172,7 +172,11 @@ function requestTimeout(options: GoogleRequestOptions): number {
   return timeout;
 }
 
-async function readBounded(response: Response, maximumBytes: number): Promise<Uint8Array> {
+async function readBounded(
+  response: Response,
+  maximumBytes: number,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
   const declared = response.headers.get("content-length");
   if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > maximumBytes)) {
     throw new RangeError("provider response is too large");
@@ -181,16 +185,24 @@ async function readBounded(response: Response, maximumBytes: number): Promise<Ui
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
+  let rejectAborted: ((reason: DOMException) => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAborted = reject;
+  });
+  const abort = (): void => rejectAborted?.(new DOMException("aborted", "AbortError"));
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
   try {
     for (;;) {
-      const part = await reader.read();
+      const part = await Promise.race([reader.read(), aborted]);
       if (part.done) break;
       size += part.value.byteLength;
       if (size > maximumBytes) throw new RangeError("provider response is too large");
       chunks.push(part.value);
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
+    signal.removeEventListener("abort", abort);
+    void reader.cancel().catch(() => undefined);
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -208,10 +220,43 @@ function isJson(response: Response): boolean {
   return mediaType === "application/json" || mediaType.endsWith("+json");
 }
 
-async function parseJson(response: Response): Promise<unknown> {
+async function parseJson(response: Response, signal: AbortSignal): Promise<unknown> {
   if (!isJson(response)) throw new TypeError("provider response is not JSON");
-  const bytes = await readBounded(response, response.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_BYTES);
+  const bytes = await readBounded(response, MAX_RESPONSE_BYTES, signal);
   return JSON.parse(decoder.decode(bytes)) as unknown;
+}
+
+function errorJson(response: Response, bytes: Uint8Array | undefined): unknown {
+  if (!isJson(response) || bytes === undefined) return undefined;
+  try {
+    return JSON.parse(decoder.decode(bytes)) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function isInvalidGrant(response: Response, bytes: Uint8Array | undefined): boolean {
+  const value = errorJson(response, bytes);
+  return isRecord(value) && value["error"] === "invalid_grant";
+}
+
+const CALENDAR_USAGE_REASONS = new Set([
+  "userRateLimitExceeded",
+  "rateLimitExceeded",
+  "quotaExceeded",
+  "dailyLimitExceeded",
+]);
+
+function isCalendarUsageLimit(response: Response, bytes: Uint8Array | undefined): boolean {
+  const value = errorJson(response, bytes);
+  if (!isRecord(value) || !isRecord(value["error"]) || !Array.isArray(value["error"]["errors"]))
+    return false;
+  return value["error"]["errors"].some(
+    (entry) =>
+      isRecord(entry) &&
+      typeof entry["reason"] === "string" &&
+      CALENDAR_USAGE_REASONS.has(entry["reason"]),
+  );
 }
 
 function retryAfter(response: Response): number | undefined {
@@ -229,11 +274,34 @@ function retryAfter(response: Response): number | undefined {
   return Math.min(seconds, MAX_RETRY_AFTER_SECONDS);
 }
 
-async function execute(
+type HttpErrorPolicy = "calendar" | "token" | "default";
+
+function httpFailure(
+  response: Response,
+  bytes: Uint8Array | undefined,
+  policy: HttpErrorPolicy,
+): ProviderOutcome<never> {
+  if (policy === "token" && response.status === 400 && isInvalidGrant(response, bytes))
+    return failure("unauthorized", "Provider authorization failed.");
+  if (response.status === 401 || response.status === 403) {
+    if (policy === "calendar" && response.status === 403 && isCalendarUsageLimit(response, bytes))
+      return failure("rate_limited", "Provider rate limit was reached.", retryAfter(response));
+    return failure("unauthorized", "Provider authorization failed.");
+  }
+  if (response.status === 429)
+    return failure("rate_limited", "Provider rate limit was reached.", retryAfter(response));
+  if (response.status >= 500)
+    return failure("unavailable", "Provider is temporarily unavailable.", retryAfter(response));
+  return failure("invalid_response", "Provider rejected the request.");
+}
+
+async function execute<T>(
   url: URL,
   init: RequestInit,
   options: GoogleRequestOptions,
-): Promise<ProviderOutcome<Response>> {
+  consume: (response: Response, signal: AbortSignal) => Promise<T>,
+  errorPolicy: HttpErrorPolicy = "default",
+): Promise<ProviderOutcome<T>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), requestTimeout(options));
   try {
@@ -242,15 +310,21 @@ async function execute(
       redirect: "error",
       signal: controller.signal,
     });
-    if (response.ok) return { ok: true, value: response };
-    await readBounded(response, MAX_ERROR_BYTES).catch(() => undefined);
-    if (response.status === 401 || response.status === 403)
-      return failure("unauthorized", "Provider authorization failed.");
-    if (response.status === 429)
-      return failure("rate_limited", "Provider rate limit was reached.", retryAfter(response));
-    if (response.status >= 500)
-      return failure("unavailable", "Provider is temporarily unavailable.", retryAfter(response));
-    return failure("invalid_response", "Provider rejected the request.");
+    if (response.ok) {
+      try {
+        return { ok: true, value: await consume(response, controller.signal) };
+      } catch {
+        if (controller.signal.aborted) throw new DOMException("aborted", "AbortError");
+        return failure("invalid_response", "Provider returned an invalid response.");
+      }
+    }
+    let bytes: Uint8Array | undefined;
+    try {
+      bytes = await readBounded(response, MAX_ERROR_BYTES, controller.signal);
+    } catch {
+      if (controller.signal.aborted) throw new DOMException("aborted", "AbortError");
+    }
+    return httpFailure(response, bytes, errorPolicy);
   } catch {
     if (controller.signal.aborted) return failure("timeout", "Provider request timed out.");
     return failure("network", "Provider request failed.");
@@ -259,18 +333,13 @@ async function execute(
   }
 }
 
-async function jsonRequest(
+function jsonRequest(
   url: URL,
   init: RequestInit,
   options: GoogleRequestOptions,
+  errorPolicy: HttpErrorPolicy = "default",
 ): Promise<ProviderOutcome<unknown>> {
-  const response = await execute(url, init, options);
-  if (!response.ok) return response;
-  try {
-    return { ok: true, value: await parseJson(response.value) };
-  } catch {
-    return failure("invalid_response", "Provider returned an invalid response.");
-  }
+  return execute(url, init, options, parseJson, errorPolicy);
 }
 
 function bearer(accessToken: string): Headers {
@@ -302,6 +371,7 @@ export async function refreshGoogleToken(
       body,
     },
     request,
+    "token",
   );
   if (!result.ok) return result;
   const value = result.value;
@@ -344,7 +414,7 @@ export async function revokeGoogleTokenBestEffort(
   request: GoogleRevocationRequest,
 ): Promise<ProviderOutcome<undefined>> {
   if (boundedString(request.token, MAX_TOKEN_BYTES) === undefined) return invalidRequest();
-  const result = await execute(
+  return execute(
     configuration(request).revocationEndpoint,
     {
       method: "POST",
@@ -352,14 +422,11 @@ export async function revokeGoogleTokenBestEffort(
       body: new URLSearchParams({ token: request.token }),
     },
     request,
+    async (response, signal) => {
+      await readBounded(response, MAX_ERROR_BYTES, signal);
+      return undefined;
+    },
   );
-  if (!result.ok) return result;
-  try {
-    await readBounded(result.value, MAX_ERROR_BYTES);
-    return { ok: true, value: undefined };
-  } catch {
-    return failure("invalid_response", "Provider returned an invalid response.");
-  }
 }
 
 function pageToken(value: unknown): string | undefined | null {
@@ -535,7 +602,7 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
     !transparency ||
     (value["recurringEventId"] !== undefined && recurringEventId === undefined) ||
     (value["originalStartTime"] !== undefined && originalStart === undefined) ||
-    (originalStart !== undefined && recurringEventId === undefined)
+    (originalStart === undefined) !== (recurringEventId === undefined)
   )
     return undefined;
   const common = {
@@ -589,6 +656,10 @@ export async function listGoogleCalendarsPage(
     configuration(request).calendarApiOrigin,
   );
   url.searchParams.set("maxResults", String(MAX_ITEMS));
+  url.searchParams.set(
+    "fields",
+    "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)",
+  );
   if (!addPageToken(url, request.pageToken)) return invalidRequest();
   let headers: Headers;
   try {
@@ -596,7 +667,7 @@ export async function listGoogleCalendarsPage(
   } catch {
     return invalidRequest();
   }
-  const result = await jsonRequest(url, { method: "GET", headers }, request);
+  const result = await jsonRequest(url, { method: "GET", headers }, request, "calendar");
   return result.ok ? normalizePage(result.value, request.pageToken, normalizeCalendar) : result;
 }
 
@@ -628,6 +699,10 @@ export async function listGoogleEventsPage(
   url.searchParams.set("orderBy", "startTime");
   url.searchParams.set("timeMin", request.timeMin);
   url.searchParams.set("timeMax", request.timeMax);
+  url.searchParams.set(
+    "fields",
+    "nextPageToken,items(id,status,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
+  );
   if (!addPageToken(url, request.pageToken)) return invalidRequest();
   let headers: Headers;
   try {
@@ -635,6 +710,6 @@ export async function listGoogleEventsPage(
   } catch {
     return invalidRequest();
   }
-  const result = await jsonRequest(url, { method: "GET", headers }, request);
+  const result = await jsonRequest(url, { method: "GET", headers }, request, "calendar");
   return result.ok ? normalizePage(result.value, request.pageToken, normalizeEvent) : result;
 }

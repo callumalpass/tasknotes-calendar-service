@@ -33,6 +33,16 @@ function fakeFetch(
     implementation(new URL(input instanceof Request ? input.url : input.toString()), init);
 }
 
+function stalledResponse(status: number, contentType?: string): Response {
+  const headers = contentType === undefined ? undefined : { "content-type": contentType };
+  return new Response(
+    new ReadableStream({
+      cancel: () => new Promise<void>(() => undefined),
+    }),
+    { status, ...(headers === undefined ? {} : { headers }) },
+  );
+}
+
 const calendar = {
   id: "opaque/calendar?identifier",
   summary: "Work <script>alert(1)</script>",
@@ -135,6 +145,31 @@ describe("Google provider HTTP boundary", () => {
     );
   });
 
+  it("maps invalid_grant refresh failures to generic unauthorized without leaking descriptions", async () => {
+    const result = await refreshGoogleToken({
+      configuration: testConfiguration,
+      fetch: fakeFetch(() =>
+        json(
+          {
+            error: "invalid_grant",
+            error_description: "refresh-secret was revoked for private@example.test",
+          },
+          400,
+        ),
+      ),
+      clientId: "client",
+      clientSecret: "client-secret",
+      refreshToken: "refresh-secret",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: { code: "unauthorized", message: "Provider authorization failed." },
+    });
+    expect(JSON.stringify(result)).not.toContain("refresh-secret");
+    expect(JSON.stringify(result)).not.toContain("private@example.test");
+  });
+
   it("rejects malformed and oversized refresh responses without exposing their contents", async () => {
     for (const payload of [
       { access_token: "secret", expires_in: "3600", token_type: "Bearer" },
@@ -191,6 +226,12 @@ describe("Google provider HTTP boundary", () => {
     expect(requested?.pathname).toBe("/calendar/v3/users/me/calendarList");
     expect(requested?.searchParams.get("pageToken")).toBe("opaque+/=?& token");
     expect(requested?.searchParams.get("maxResults")).toBe("250");
+    expect(requested?.searchParams.get("fields")).toBe(
+      "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)",
+    );
+    for (const excluded of ["etag", "conferenceProperties", "notificationSettings"]) {
+      expect(requested?.searchParams.get("fields")).not.toContain(excluded);
+    }
     expect(result).toEqual({
       ok: true,
       value: {
@@ -228,6 +269,19 @@ describe("Google provider HTTP boundary", () => {
     expect(requested?.searchParams.get("singleEvents")).toBe("true");
     expect(requested?.searchParams.get("showDeleted")).toBe("true");
     expect(requested?.searchParams.get("orderBy")).toBe("startTime");
+    expect(requested?.searchParams.get("fields")).toBe(
+      "nextPageToken,items(id,status,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
+    );
+    for (const excluded of [
+      "attendees",
+      "organizer",
+      "conferenceData",
+      "htmlLink",
+      "recurrence",
+      "extendedProperties",
+    ]) {
+      expect(requested?.searchParams.get("fields")).not.toContain(excluded);
+    }
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected successful event page");
     expect(result.value.items[0]).toEqual({
@@ -300,6 +354,33 @@ describe("Google provider HTTP boundary", () => {
         ],
       },
     });
+  });
+
+  it.each([
+    {
+      recurringEventId: "series-without-original-start",
+    },
+    {
+      originalStartTime: { dateTime: "2026-03-10T13:00:00Z" },
+    },
+  ])("rejects incomplete recurrence-instance pairs", async (recurrence) => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            {
+              id: "bad-instance",
+              status: "confirmed",
+              start: { dateTime: "2026-03-10T13:00:00Z" },
+              end: { dateTime: "2026-03-10T14:00:00Z" },
+              ...recurrence,
+            },
+          ],
+        }),
+      ),
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
   });
 
   it.each([
@@ -390,6 +471,55 @@ describe("Google provider HTTP boundary", () => {
     expect(result).toMatchObject({ ok: false, error: { code } });
   });
 
+  it.each(["userRateLimitExceeded", "rateLimitExceeded", "quotaExceeded", "dailyLimitExceeded"])(
+    "maps Calendar 403 %s usage errors to bounded rate limits",
+    async (reason) => {
+      const result = await listGoogleCalendarsPage({
+        configuration: testConfiguration,
+        accessToken: "access-secret",
+        fetch: fakeFetch(() =>
+          json(
+            {
+              error: {
+                errors: [{ reason, message: "access-secret private provider detail" }],
+              },
+            },
+            403,
+            { "retry-after": "999999" },
+          ),
+        ),
+      });
+      expect(result).toEqual({
+        ok: false,
+        error: {
+          code: "rate_limited",
+          message: "Provider rate limit was reached.",
+          retryAfterSeconds: 3600,
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain("access-secret");
+    },
+  );
+
+  it("keeps non-usage and oversized Calendar 403 errors unauthorized", async () => {
+    for (const body of [
+      { error: { errors: [{ reason: "forbidden", message: "private detail" }] } },
+      {
+        padding: "x".repeat(16_384),
+        error: { errors: [{ reason: "quotaExceeded" }] },
+      },
+    ]) {
+      const result = await listGoogleEventsPage({
+        ...eventsRequest,
+        fetch: fakeFetch(() => json(body, 403, { "retry-after": "120" })),
+      });
+      expect(result).toEqual({
+        ok: false,
+        error: { code: "unauthorized", message: "Provider authorization failed." },
+      });
+    }
+  });
+
   it("maps bounded retry errors without leaking hostile error bodies", async () => {
     const limited = await listGoogleCalendarsPage({
       configuration: testConfiguration,
@@ -417,6 +547,41 @@ describe("Google provider HTTP boundary", () => {
       ok: false,
       error: { code: "unavailable", message: "Provider is temporarily unavailable." },
     });
+  });
+
+  it("keeps the timeout active while success, error, and revocation bodies stall", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests = [
+        listGoogleCalendarsPage({
+          configuration: testConfiguration,
+          accessToken: "access",
+          timeoutMs: 10,
+          fetch: fakeFetch(() => stalledResponse(200, "application/json")),
+        }),
+        listGoogleEventsPage({
+          ...eventsRequest,
+          timeoutMs: 10,
+          fetch: fakeFetch(() => stalledResponse(503, "application/json")),
+        }),
+        revokeGoogleTokenBestEffort({
+          configuration: testConfiguration,
+          token: "revocation-secret",
+          timeoutMs: 10,
+          fetch: fakeFetch(() => stalledResponse(200)),
+        }),
+      ];
+      await vi.advanceTimersByTimeAsync(11);
+      const results = await Promise.all(requests);
+      for (const result of results) {
+        expect(result).toEqual({
+          ok: false,
+          error: { code: "timeout", message: "Provider request timed out." },
+        });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bounds request duration and distinguishes network failure", async () => {
