@@ -453,9 +453,20 @@ function timeZone(value: unknown): string | undefined | null {
   }
 }
 
-function optionalText(value: unknown, maximumBytes: number): string | undefined | null {
+function optionalText(
+  value: unknown,
+  maximumBytes: number,
+  maximumCharacters?: number,
+): string | undefined | null {
   if (value === undefined) return undefined;
-  return boundedString(value, maximumBytes, true) ?? null;
+  const text = boundedString(value, maximumBytes, true);
+  if (
+    text === undefined ||
+    (maximumCharacters !== undefined && Array.from(text).length > maximumCharacters)
+  ) {
+    return null;
+  }
+  return text;
 }
 
 function normalizeCalendar(value: unknown): ProviderCalendar | undefined {
@@ -570,9 +581,9 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
   const hasEnd = Object.hasOwn(value, "end");
   const start = hasStart ? boundary(value["start"]) : undefined;
   const end = hasEnd ? boundary(value["end"]) : undefined;
-  const title = optionalText(value["summary"], MAX_TITLE_BYTES);
-  const description = optionalText(value["description"], MAX_DESCRIPTION_BYTES);
-  const location = optionalText(value["location"], MAX_LOCATION_BYTES);
+  const title = optionalText(value["summary"], MAX_TITLE_BYTES, 1_000);
+  const description = optionalText(value["description"], MAX_DESCRIPTION_BYTES, 16_000);
+  const location = optionalText(value["location"], MAX_LOCATION_BYTES, 1_000);
   const transparency =
     value["transparency"] === undefined || value["transparency"] === "opaque"
       ? "opaque"

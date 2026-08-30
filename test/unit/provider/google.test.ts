@@ -444,6 +444,31 @@ describe("Google provider HTTP boundary", () => {
     });
   });
 
+  it.each([
+    ["summary", 1_001],
+    ["description", 16_001],
+    ["location", 1_001],
+  ] as const)("rejects event text beyond public character limits", async (field, length) => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            {
+              id: "oversized-text",
+              status: "confirmed",
+              updated: "2026-03-09T12:00:00Z",
+              start: { dateTime: "2026-03-10T13:00:00Z" },
+              end: { dateTime: "2026-03-10T14:00:00Z" },
+              [field]: "x".repeat(length),
+            },
+          ],
+        }),
+      ),
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+  });
+
   it.each([{ start: { date: "2026-03-10" } }, { end: { date: "2026-03-11" } }])(
     "rejects one-sided cancelled intervals",
     async (boundaries) => {

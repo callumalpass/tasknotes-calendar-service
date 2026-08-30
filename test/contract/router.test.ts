@@ -498,13 +498,13 @@ describe("contract router", () => {
       updated_at: instant,
       recurrence: null,
     };
-    const valid = await createRouter(
+    const valid = await router(
       handlers({ events: () => Promise.resolve({ events: [tombstone], next_cursor: null }) }),
-    )(new Request(`https://calendar.test${path}`));
+    )(authenticatedRequest(path));
     expect(valid.status).toBe(200);
     await expect(valid.json()).resolves.toEqual({ events: [tombstone], next_cursor: null });
 
-    const invalid = await createRouter(
+    const invalid = await router(
       handlers({
         events: () =>
           Promise.resolve({
@@ -512,7 +512,7 @@ describe("contract router", () => {
             next_cursor: null,
           }),
       }),
-    )(new Request(`https://calendar.test${path}`));
+    )(authenticatedRequest(path));
     expect(invalid.status).toBe(500);
     await expect(invalid.json()).resolves.toEqual({
       code: "internal_error",
