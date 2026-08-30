@@ -1,9 +1,20 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
+import ts from "typescript";
 import { defineConfig } from "vitest/config";
 
 const migrations = await readD1Migrations(path.join(import.meta.dirname, "migrations"));
+const fakeGoogleWorker = ts.transpileModule(
+  await fs.readFile(path.join(import.meta.dirname, "test/support/fake-google-worker.ts"), "utf8"),
+  {
+    compilerOptions: {
+      module: ts.ModuleKind.ESNext,
+      target: ts.ScriptTarget.ES2022,
+    },
+  },
+).outputText;
 
 export default defineConfig({
   plugins: [
@@ -16,6 +27,23 @@ export default defineConfig({
           TEST_MIGRATIONS: migrations,
           EVENT_ID_KEY_V1: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         },
+        outboundService: "fake-google",
+        serviceBindings: {
+          FAKE_GOOGLE: "fake-google",
+        },
+        workers: [
+          {
+            name: "fake-google",
+            compatibilityDate: "2026-08-22",
+            modules: [
+              {
+                type: "ESModule",
+                path: "fake-google-worker.js",
+                contents: fakeGoogleWorker,
+              },
+            ],
+          },
+        ],
       },
     }),
   ],
