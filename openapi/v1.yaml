@@ -252,7 +252,7 @@ paths:
             name: state,
             in: query,
             required: true,
-            schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" },
+            schema: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" },
           }
         - {
             name: code,
@@ -331,7 +331,7 @@ components:
         name: transaction_id,
         in: path,
         required: true,
-        schema: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" },
+        schema: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" },
       }
     ConnectionId:
       { name: connection_id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -342,7 +342,7 @@ components:
         name: device_id,
         in: path,
         required: true,
-        schema: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" },
+        schema: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" },
       }
   requestBodies:
     TransactionStatus:
@@ -395,28 +395,28 @@ components:
           maxLength: 128
           description: Trimmed, control-character-free, and at most 128 UTF-8 bytes.
           x-max-utf8-bytes: 128
-        code_challenge: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        code_challenge: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
     TransactionStartResponse:
       type: object
       additionalProperties: false
       required: [transaction_id, authorization_url, polling_secret, expires_at]
       properties:
-        transaction_id: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        transaction_id: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
         authorization_url: { type: string, format: uri, maxLength: 2048 }
-        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
         expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     TransactionStatusRequest:
       type: object
       additionalProperties: false
       required: [polling_secret]
       properties:
-        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
     TransactionRedeemRequest:
       type: object
       additionalProperties: false
       required: [polling_secret, code_verifier]
       properties:
-        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
         code_verifier: { type: string, pattern: "^[A-Za-z0-9._~-]{43,128}$" }
     TransactionStatus:
       oneOf:
@@ -467,7 +467,7 @@ components:
             type: string,
             pattern: "^v1\\.[A-Za-z0-9_-]{21}[AQgw]\\.[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$",
           }
-        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
+        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     SignInRedeemResponse:
@@ -495,7 +495,7 @@ components:
         ]
       properties:
         principal_id: { type: string, format: uuid }
-        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
+        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
         client_kind: { $ref: "#/components/schemas/ClientKind" }
         device_name:
           type: string
@@ -641,7 +641,7 @@ components:
       additionalProperties: false
       required: [id, client_kind, device_name, created_at, last_used_at, current]
       properties:
-        id: { type: string, pattern: "^[A-Za-z0-9_-]{22}$" }
+        id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
         client_kind: { $ref: "#/components/schemas/ClientKind" }
         device_name:
           type: string

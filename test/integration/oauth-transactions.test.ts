@@ -596,7 +596,7 @@ describe("OAuth transactions against migrated D1", () => {
     expect(redemptions.filter((attempt) => attempt.status === "rejected")).toHaveLength(24);
   });
 
-  it("removes an unredeemed active connection when its authorized transaction expires", async () => {
+  it("retains a completed connection when its confirmation transaction expires", async () => {
     await insertPrincipal();
     const started = await startConnect();
     await service.callback({ code: "calendar-provider-code", state: state(started) });
@@ -606,12 +606,12 @@ describe("OAuth transactions against migrated D1", () => {
     ).resolves.toEqual({ status: "expired" });
     await expect(
       testEnv.DB.prepare("SELECT COUNT(*) AS count FROM connections").first("count"),
-    ).resolves.toBe(0);
+    ).resolves.toBe(1);
     await expect(
       testEnv.DB.prepare("SELECT google_connection_generation FROM principals WHERE id = ?")
         .bind(PRINCIPAL)
         .first("google_connection_generation"),
-    ).resolves.toBe(2);
+    ).resolves.toBe(1);
   });
 
   it("recovers connect finalization after ambiguous before- and after-commit batch faults", async () => {

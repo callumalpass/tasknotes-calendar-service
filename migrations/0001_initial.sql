@@ -587,25 +587,6 @@ BEGIN
   SELECT RAISE(ABORT, 'oauth transaction binding is immutable');
 END;
 
-CREATE TRIGGER oauth_transactions_cleanup_expired_authorized_connect
-AFTER UPDATE ON oauth_transactions
-FOR EACH ROW
-WHEN OLD.intent = 'connect_calendar'
-  AND OLD.status = 'authorized'
-  AND NEW.status = 'expired'
-BEGIN
-  DELETE FROM connections
-  WHERE id = OLD.authorized_connection_id
-    AND principal_id = OLD.authorized_principal_id
-    AND identity_id = OLD.authorized_identity_id
-    AND generation = OLD.target_connection_generation
-    AND EXISTS (
-      SELECT 1 FROM principals
-      WHERE id = OLD.authorized_principal_id
-        AND google_connection_generation = OLD.target_connection_generation
-    );
-END;
-
 CREATE TABLE device_sessions (
   id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,

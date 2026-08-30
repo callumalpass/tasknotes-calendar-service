@@ -39,6 +39,8 @@ describe("OpenAPI and runtime contract", () => {
     expect(spec).toContain('const: "private, no-store"');
     expect(spec).toContain("const: nosniff");
     expect(spec).toContain(`enum: [${CLIENT_KINDS.join(", ")}]`);
+    expect(spec).toContain("{42}[AEIMQUYcgkosw048]");
+    expect(spec).toContain("{21}[AQgw]");
   });
 
   it("documents the strict status union, opaque recurrence IDs, and tombstone pair variants", () => {

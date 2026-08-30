@@ -14,7 +14,7 @@ import {
   UuidSchema,
 } from "./common";
 
-export const PkceChallengeSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const PkceChallengeSchema = TransactionIdSchema;
 export const PkceVerifierSchema = z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/);
 
 export const TransactionStartRequestSchema = z.strictObject({

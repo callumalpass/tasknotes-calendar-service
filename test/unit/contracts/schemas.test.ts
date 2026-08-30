@@ -29,7 +29,7 @@ describe("public contract schemas", () => {
     const valid = {
       client_kind: "obsidian",
       device_name: "Work laptop",
-      code_challenge: "a".repeat(43),
+      code_challenge: "A".repeat(43),
     };
     expect(TransactionStartRequestSchema.safeParse(valid).success).toBe(true);
     expect(

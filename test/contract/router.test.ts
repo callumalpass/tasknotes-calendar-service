@@ -112,7 +112,7 @@ function authenticatedRequest(path: string, init: RequestInit = {}): Request {
 const startBody = {
   client_kind: "web",
   device_name: "Browser",
-  code_challenge: "a".repeat(43),
+  code_challenge: "A".repeat(43),
 };
 
 const generic401 = {
