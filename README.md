@@ -32,6 +32,36 @@ Calendar discovery, and bounded live event pages. Calendar mappings are durable 
 event bodies and provider event identifiers are never persisted. Provider pagination tokens are
 returned only inside authenticated, expiring cursors.
 
+## Isolated LAB
+
+The non-production Worker is available at `https://tasknotes-calendar-lab.callumalpass.workers.dev`.
+Its dedicated D1 database is empty and all migrations are applied. Liveness and readiness are public
+only as private, non-cacheable health responses; application routes still require service
+authentication.
+
+Real Google acceptance remains disabled while `GOOGLE_CLIENT_ID` is the explicit pending value. The
+Google Web OAuth client must register this exact redirect URI:
+
+```text
+https://tasknotes-calendar-lab.callumalpass.workers.dev/oauth/google/callback
+```
+
+Install the client secret interactively rather than writing it to a file or shell history:
+
+```bash
+pnpm exec wrangler secret put GOOGLE_CLIENT_SECRET --env lab
+```
+
+After putting the public client ID in the LAB vars, verify and deploy deliberately:
+
+```bash
+pnpm migrations:lab:list
+pnpm deploy:lab:dry-run
+pnpm exec wrangler deploy --env lab
+```
+
+These commands target LAB only. Production deployment is not configured.
+
 See:
 
 - [`PRODUCT.md`](PRODUCT.md)

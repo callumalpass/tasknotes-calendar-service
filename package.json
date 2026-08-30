@@ -20,7 +20,10 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run test/e2e",
     "migrations:local": "wrangler d1 migrations apply tasknotes-calendar-local --local",
-    "deploy:dry-run": "wrangler deploy --dry-run --outdir dist/worker",
+    "migrations:lab:list": "wrangler d1 migrations list tasknotes-calendar-lab --remote --env lab",
+    "migrations:lab": "wrangler d1 migrations apply tasknotes-calendar-lab --remote --env lab",
+    "deploy:dry-run": "wrangler deploy --env=\"\" --dry-run --outdir dist/worker",
+    "deploy:lab:dry-run": "wrangler deploy --env lab --dry-run --outdir dist/worker-lab",
     "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test:security && pnpm test:coverage && pnpm deploy:dry-run"
   },
   "dependencies": {

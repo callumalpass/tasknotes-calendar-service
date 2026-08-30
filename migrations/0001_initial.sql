@@ -463,17 +463,17 @@ CREATE TRIGGER connections_advance_epoch_before_delete
 BEFORE DELETE ON connections
 FOR EACH ROW
 BEGIN
-  SELECT CASE WHEN EXISTS (
+  SELECT RAISE(ABORT, 'invalid connection deletion authority')
+  WHERE EXISTS (
     SELECT 1 FROM principals
     WHERE id = OLD.principal_id
       AND google_connection_generation IS NOT OLD.generation
-  ) THEN RAISE(ABORT, 'invalid connection deletion authority') END;
+  );
   UPDATE principals
   SET google_connection_generation = OLD.generation + 1
   WHERE id = OLD.principal_id
     AND google_connection_generation = OLD.generation;
 END;
-
 CREATE TABLE oauth_transactions (
   id TEXT PRIMARY KEY,
   intent TEXT NOT NULL CHECK (intent IN ('sign_in', 'connect_calendar')),
@@ -792,7 +792,6 @@ WHEN NEW.id IS NOT OLD.id
 BEGIN
   SELECT RAISE(ABORT, 'oauth transaction binding is immutable');
 END;
-
 CREATE TABLE device_sessions (
   id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
