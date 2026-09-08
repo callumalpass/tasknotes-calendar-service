@@ -278,7 +278,7 @@ describe("contract router", () => {
     expect(response.url).not.toContain(pollingSecret);
   });
 
-  it("enforces JSON media type and actual body bytes", async () => {
+  it("enforces JSON media type, declared length, and actual body bytes", async () => {
     const route = router();
     expect((await route(jsonRequest("/v1/sign-in/start", startBody, "text/plain"))).status).toBe(
       415,
@@ -294,6 +294,59 @@ describe("contract router", () => {
       (await route(jsonRequest("/v1/sign-in/start", { ...startBody, padding: "x".repeat(17_000) })))
         .status,
     ).toBe(413);
+
+    for (const contentLength of ["invalid", "17000"]) {
+      const request = jsonRequest("/v1/sign-in/start", startBody);
+      request.headers.set("content-length", contentLength);
+      expect((await route(request)).status).toBe(contentLength === "invalid" ? 400 : 413);
+    }
+    expect(
+      (
+        await route(
+          new Request("https://calendar.test/v1/sign-in/start", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+          }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await route(
+          new Request("https://calendar.test/v1/sign-in/start", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{",
+          }),
+        )
+      ).status,
+    ).toBe(400);
+  });
+
+  it("accepts an edge-normalized empty DELETE stream but rejects nonempty bytes", async () => {
+    const disconnect = vi.fn(() => Promise.resolve(undefined));
+    const route = router(handlers({ disconnect }));
+
+    const empty = await route(
+      authenticatedRequest(`/v1/connections/${id}`, { method: "DELETE", body: "" }),
+    );
+    expect(empty.status).toBe(204);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+
+    const nonempty = await route(
+      authenticatedRequest(`/v1/connections/${id}`, { method: "DELETE", body: "x" }),
+    );
+    expect(nonempty.status).toBe(400);
+
+    for (const contentLength of ["invalid", "1"]) {
+      const request = authenticatedRequest(`/v1/connections/${id}`, {
+        method: "DELETE",
+        body: "",
+        headers: { "content-length": contentLength },
+      });
+      expect((await route(request)).status).toBe(400);
+    }
+    expect(disconnect).toHaveBeenCalledTimes(1);
   });
 
   it.each(authenticatedRouteCases)(

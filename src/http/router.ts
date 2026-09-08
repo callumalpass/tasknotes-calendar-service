@@ -121,6 +121,29 @@ function hasJsonContentType(request: Request): boolean {
   return parts.length === 0 || parts[0] === "charset=utf-8";
 }
 
+async function assertEmptyBody(request: Request): Promise<void> {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null) {
+    if (!/^\d+$/.test(declaredLength)) throw new InvalidInputError("invalid_request");
+    if (Number(declaredLength) > 0) throw new InvalidInputError("invalid_request");
+  }
+  if (request.body === null) return;
+
+  const reader = request.body.getReader();
+  try {
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) return;
+      if (result.value.byteLength > 0) {
+        await reader.cancel();
+        throw new InvalidInputError("invalid_request");
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function readBoundedJson(request: Request): Promise<unknown> {
   if (!hasJsonContentType(request)) throw new InvalidInputError("unsupported_media_type");
 
@@ -208,8 +231,8 @@ async function dispatch(
     const bodyResult = route.definition.body.safeParse(await readBoundedJson(request));
     if (!bodyResult.success) throw new InvalidInputError("invalid_request");
     body = bodyResult.data;
-  } else if (request.body !== null) {
-    throw new InvalidInputError("invalid_request");
+  } else {
+    await assertEmptyBody(request);
   }
 
   const input: RouteInput = Object.freeze({
