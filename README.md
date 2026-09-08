@@ -39,22 +39,23 @@ dedicated D1 database is empty and all migrations are applied. The public `worke
 intentionally disabled between acceptance runs so anonymous OAuth-start traffic cannot write to D1
 outside supervised testing.
 
-The LAB Google client ID is configured, but real acceptance remains disabled until client-secret
-installation is confirmed and the public trigger is explicitly enabled. The Google Web OAuth client
-must register this exact redirect URI:
+The LAB Google client and secret have passed a supervised live sign-in, Calendar consent, discovery,
+event-read, disconnect, and deletion run. The public trigger is disabled between runs. The Google
+Web OAuth client registers this exact redirect URI:
 
 ```text
 https://tasknotes-calendar-lab.callumalpass.workers.dev/oauth/google/callback
 ```
 
-Install the client secret interactively rather than writing it to a file or shell history:
+Future secret rotations must remain interactive rather than entering the value in a file or shell
+history:
 
 ```bash
 pnpm exec wrangler secret put GOOGLE_CLIENT_SECRET --env lab
 ```
 
-After installing the client secret and explicitly re-enabling the LAB `workers_dev` trigger, verify
-and deploy deliberately:
+Before another supervised run, explicitly re-enable the LAB `workers_dev` trigger, verify, and
+deploy deliberately:
 
 ```bash
 pnpm migrations:lab:list
