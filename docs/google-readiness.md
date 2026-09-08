@@ -3,7 +3,8 @@
 Implementation and fake-provider tests may proceed without live credentials. An isolated LAB Worker
 and empty D1 database are deployed for `https://tasknotes-calendar-lab.callumalpass.workers.dev`,
 but its public trigger is disabled and Google client remains deliberately pending between acceptance
-runs. Real Google testing is blocked until a human-controlled Google Cloud project provides:
+runs. The Google Calendar API is enabled in the dedicated `tasknotes-calendar-lab` Google Cloud
+project. Real Google testing is blocked until the project provides:
 
 - a Web application OAuth client dedicated to LAB;
 - the exact callback URI
