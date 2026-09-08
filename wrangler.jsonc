@@ -44,7 +44,7 @@
       "vars": {
         "ENVIRONMENT": "lab",
         "PUBLIC_ORIGIN": "https://tasknotes-calendar-lab.callumalpass.workers.dev",
-        "GOOGLE_CLIENT_ID": "pending-google-client",
+        "GOOGLE_CLIENT_ID": "1053661144223-a06h6u8uijtpnncoupo208qalse18a04.apps.googleusercontent.com",
         "GOOGLE_AUTHORIZATION_ENDPOINT": "https://accounts.google.com/o/oauth2/v2/auth",
         "GOOGLE_TOKEN_ENDPOINT": "https://oauth2.googleapis.com/token",
         "GOOGLE_JWKS_URI": "https://www.googleapis.com/oauth2/v3/certs",
