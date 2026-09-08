@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { createHandlers } from "./http/handlers";
+import { withLabCors } from "./http/lab-cors";
 import { errorResponse } from "./http/responses";
 import { createRouter } from "./http/router";
 import { publicOriginFromEnvironment, runtimeConfiguration } from "./runtime/configuration";
@@ -25,7 +26,7 @@ export function createWorker(): ExportedHandler<Env> {
         if (new URL(request.url).origin !== publicOriginFromEnvironment(env)) {
           return Promise.resolve(errorResponse("resource_not_found"));
         }
-        return router(env)(request);
+        return withLabCors(request, env.ENVIRONMENT, () => router(env)(request));
       } catch {
         return Promise.resolve(errorResponse("internal_error"));
       }
