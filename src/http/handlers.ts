@@ -1,6 +1,11 @@
 import { OAuthTransactionError, type OAuthTransactions } from "../auth/oauth-transactions";
 import { LiveGoogleCalendarError } from "../calendar/live-google-calendar";
-import type { EventsQuery } from "../contracts";
+import type {
+  EventsQuery,
+  ChangesQuery,
+  CreateEventRequest,
+  PatchEventRequest,
+} from "../contracts";
 import type { ProviderCallbackQuery, TransactionStartRequest } from "../contracts/transactions";
 import { decryptTokenEnvelope } from "../crypto/token-envelope";
 import type { Env } from "../env";
@@ -8,7 +13,7 @@ import { revokeGoogleTokenBestEffort } from "../provider/google";
 import type { TokenEnvelopeRow } from "../storage/token-envelope-row";
 import { tokenEnvelopeFromRow } from "../storage/token-envelope-row";
 import type { RouteHandlers, RouteInput } from "./router";
-import { ContractError } from "./responses";
+import { ContractError, linkingResponse } from "./responses";
 import { runtimeConfiguration, type RuntimeConfiguration } from "../runtime/configuration";
 
 interface ConnectionRow extends TokenEnvelopeRow {
@@ -71,6 +76,8 @@ async function calendar(operation: () => Promise<unknown>): Promise<unknown> {
   } catch (error) {
     if (error instanceof LiveGoogleCalendarError) {
       if (error.code === "invalid_request") throw new ContractError("invalid_request");
+      if (error.code === "permission_denied") throw new ContractError("permission_denied");
+      if (error.code === "sync_reset_required") throw new ContractError("sync_reset_required");
       if (error.code === "not_found") throw new ContractError("resource_not_found");
       if (error.code === "reconnect" || error.code === "conflict")
         throw new ContractError("conflict");
@@ -82,13 +89,39 @@ async function calendar(operation: () => Promise<unknown>): Promise<unknown> {
   }
 }
 
+async function refreshTokenForRevocation(
+  runtime: RuntimeConfiguration,
+  row: ConnectionRow | null,
+): Promise<string | undefined> {
+  if (row === null) return undefined;
+  try {
+    return (
+      await decryptTokenEnvelope(
+        tokenEnvelopeFromRow(row),
+        {
+          environment: runtime.environment,
+          provider: "google",
+          principalId: row.principal_id,
+          connectionId: row.id,
+          connectionGeneration: row.generation,
+          tokenVersion: row.token_version,
+          tokenKind: "calendar_oauth",
+        },
+        runtime.tokenKeyring,
+      )
+    ).refreshToken;
+  } catch {
+    return undefined;
+  }
+}
+
 export function createHandlers(env: Env): RouteHandlers {
-  const configured = runtimeConfiguration(env);
+  const configured = () => runtimeConfiguration(env);
   return {
     healthLive: () => Promise.resolve({ status: "ok" }),
     healthReady: async () => {
       try {
-        await configured;
+        await configured();
         await env.DB.prepare("SELECT 1 AS ready").first();
         return { status: "ready" };
       } catch {
@@ -98,26 +131,31 @@ export function createHandlers(env: Env): RouteHandlers {
     signInStart: (input) =>
       oauth(
         (transactions) => transactions.startSignIn(body(input) as TransactionStartRequest),
-        configured,
+        configured(),
       ),
     signInStatus: (input) => {
       const request = body(input) as { polling_secret: string };
       return oauth(
         (transactions) =>
           transactions.statusSignIn(input.params["transaction_id"] ?? "", request.polling_secret),
-        configured,
+        configured(),
       );
     },
     signInRedeem: (input) => {
-      const request = body(input) as { polling_secret: string; code_verifier: string };
+      const request = body(input) as {
+        polling_secret: string;
+        code_verifier: string;
+        confirmation_code: string;
+      };
       return oauth(
         (transactions) =>
           transactions.redeemSignIn(
             input.params["transaction_id"] ?? "",
             request.polling_secret,
             request.code_verifier,
+            request.confirmation_code,
           ),
-        configured,
+        configured(),
       );
     },
     connectStart: (input) =>
@@ -127,7 +165,7 @@ export function createHandlers(env: Env): RouteHandlers {
             authenticated(input).principalId,
             body(input) as TransactionStartRequest,
           ),
-        configured,
+        configured(),
       ),
     connectStatus: (input) => {
       const request = body(input) as { polling_secret: string };
@@ -138,7 +176,7 @@ export function createHandlers(env: Env): RouteHandlers {
             input.params["transaction_id"] ?? "",
             request.polling_secret,
           ),
-        configured,
+        configured(),
       );
     },
     connectRedeem: (input) => {
@@ -151,13 +189,14 @@ export function createHandlers(env: Env): RouteHandlers {
             request.polling_secret,
             request.code_verifier,
           ),
-        configured,
+        configured(),
       );
     },
     providerCallback: (input) =>
       oauth(
-        (transactions) => transactions.callback(input.query as ProviderCallbackQuery),
-        configured,
+        async (transactions) =>
+          linkingResponse(await transactions.callback(input.query as ProviderCallbackQuery)),
+        configured(),
       ),
     session: (input) => {
       const context = authenticated(input);
@@ -172,7 +211,7 @@ export function createHandlers(env: Env): RouteHandlers {
       });
     },
     connections: async (input) => {
-      await configured;
+      await configured();
       const rows = await env.DB.prepare(
         `SELECT id, status, created_at, updated_at FROM connections
          WHERE principal_id = ? AND provider = 'google' ORDER BY created_at, id LIMIT 1`,
@@ -189,8 +228,8 @@ export function createHandlers(env: Env): RouteHandlers {
         })),
       };
     },
-    disconnect: async (input) => {
-      const runtime = await configured;
+    disconnect: async (input, _request, ctx) => {
+      const runtime = await configured();
       const principalId = authenticated(input).principalId;
       const connectionId = input.params["connection_id"] ?? "";
       const row = await env.DB.prepare(
@@ -201,55 +240,34 @@ export function createHandlers(env: Env): RouteHandlers {
         .bind(connectionId, principalId)
         .first<ConnectionRow>();
       if (row === null) throw new ContractError("resource_not_found");
-      let refreshToken: string | undefined;
-      try {
-        refreshToken = (
-          await decryptTokenEnvelope(
-            tokenEnvelopeFromRow(row),
-            {
-              environment: runtime.environment,
-              provider: "google",
-              principalId,
-              connectionId: row.id,
-              connectionGeneration: row.generation,
-              tokenVersion: row.token_version,
-              tokenKind: "calendar_oauth",
-            },
-            runtime.tokenKeyring,
-          )
-        ).refreshToken;
-      } catch {
-        // Local disconnection must still fence authority when provider token material is corrupt.
-      }
+      const refreshToken = await refreshTokenForRevocation(runtime, row);
       const deleted = await env.DB.prepare(
         `DELETE FROM connections WHERE id = ? AND principal_id = ? AND provider = 'google'
-         AND generation = ? AND token_version = ? RETURNING id`,
+         AND generation = ? RETURNING id`,
       )
-        .bind(row.id, principalId, row.generation, row.token_version)
+        .bind(row.id, principalId, row.generation)
         .first<{ id: string }>();
       if (deleted?.id !== row.id) throw new ContractError("conflict");
       if (refreshToken !== undefined) {
-        try {
-          await revokeGoogleTokenBestEffort({
+        ctx.waitUntil(
+          revokeGoogleTokenBestEffort({
             configuration: runtime.googleProvider,
             token: refreshToken,
             fetch: runtime.outboundFetch,
             timeoutMs: 5_000,
-          });
-        } catch {
-          // Local deletion and its generation fence are authoritative; provider revocation is best effort.
-        }
+          }).catch(() => undefined),
+        );
       }
       return undefined;
     },
     calendars: async (input) => {
-      const runtime = await configured;
+      const runtime = await configured();
       return calendar(() =>
         runtime.liveGoogleCalendar.listCalendars(authenticated(input).principalId),
       );
     },
     events: async (input) => {
-      const runtime = await configured;
+      const runtime = await configured();
       return calendar(() =>
         runtime.liveGoogleCalendar.listEvents(
           authenticated(input).principalId,
@@ -258,8 +276,70 @@ export function createHandlers(env: Env): RouteHandlers {
         ),
       );
     },
+    changes: async (input) => {
+      const runtime = await configured();
+      return calendar(() =>
+        runtime.liveGoogleCalendar.listChanges(
+          authenticated(input).principalId,
+          input.params["calendar_id"] ?? "",
+          input.query as ChangesQuery,
+        ),
+      );
+    },
+    createEvent: async (input, request) => {
+      const runtime = await configured();
+      return calendar(() =>
+        runtime.liveGoogleCalendar.event(
+          authenticated(input).principalId,
+          input.params["calendar_id"] ?? "",
+          "POST",
+          input.params["event_id"],
+          input.body as CreateEventRequest | PatchEventRequest | undefined,
+          request.headers.get("If-Match") ?? undefined,
+        ),
+      );
+    },
+    getEvent: async (input, request) => {
+      const runtime = await configured();
+      return calendar(() =>
+        runtime.liveGoogleCalendar.event(
+          authenticated(input).principalId,
+          input.params["calendar_id"] ?? "",
+          "GET",
+          input.params["event_id"],
+          input.body as CreateEventRequest | PatchEventRequest | undefined,
+          request.headers.get("If-Match") ?? undefined,
+        ),
+      );
+    },
+    patchEvent: async (input, request) => {
+      const runtime = await configured();
+      return calendar(() =>
+        runtime.liveGoogleCalendar.event(
+          authenticated(input).principalId,
+          input.params["calendar_id"] ?? "",
+          "PATCH",
+          input.params["event_id"],
+          input.body as CreateEventRequest | PatchEventRequest | undefined,
+          request.headers.get("If-Match") ?? undefined,
+        ),
+      );
+    },
+    deleteEvent: async (input, request) => {
+      const runtime = await configured();
+      return calendar(() =>
+        runtime.liveGoogleCalendar.event(
+          authenticated(input).principalId,
+          input.params["calendar_id"] ?? "",
+          "DELETE",
+          input.params["event_id"],
+          input.body as CreateEventRequest | PatchEventRequest | undefined,
+          request.headers.get("If-Match") ?? undefined,
+        ),
+      );
+    },
     devices: async (input) => {
-      const runtime = await configured;
+      const runtime = await configured();
       const context = authenticated(input);
       const sessions = await runtime.deviceSessions.list(context.principalId);
       return {
@@ -274,7 +354,7 @@ export function createHandlers(env: Env): RouteHandlers {
       };
     },
     revokeDevice: async (input) => {
-      const runtime = await configured;
+      const runtime = await configured();
       const revoked = await runtime.deviceSessions.revoke(
         authenticated(input).principalId,
         input.params["device_id"] ?? "",
@@ -282,8 +362,8 @@ export function createHandlers(env: Env): RouteHandlers {
       if (!revoked) throw new ContractError("resource_not_found");
       return undefined;
     },
-    deleteAccount: async (input) => {
-      const runtime = await configured;
+    deleteAccount: async (input, _request, ctx) => {
+      const runtime = await configured();
       const principalId = authenticated(input).principalId;
       const connection = await env.DB.prepare(
         `SELECT id, principal_id, status, generation, token_version, created_at, updated_at,
@@ -292,28 +372,7 @@ export function createHandlers(env: Env): RouteHandlers {
       )
         .bind(principalId)
         .first<ConnectionRow>();
-      let refreshToken: string | undefined;
-      if (connection !== null) {
-        try {
-          refreshToken = (
-            await decryptTokenEnvelope(
-              tokenEnvelopeFromRow(connection),
-              {
-                environment: runtime.environment,
-                provider: "google",
-                principalId,
-                connectionId: connection.id,
-                connectionGeneration: connection.generation,
-                tokenVersion: connection.token_version,
-                tokenKind: "calendar_oauth",
-              },
-              runtime.tokenKeyring,
-            )
-          ).refreshToken;
-        } catch {
-          // Local account deletion must still complete when provider token material is corrupt.
-        }
-      }
+      const refreshToken = await refreshTokenForRevocation(runtime, connection);
       const identity = await env.DB.prepare(
         `SELECT id, provider, issuer, subject FROM external_identities
          WHERE principal_id = ? AND provider = 'google' AND issuer = 'https://accounts.google.com'
@@ -333,16 +392,14 @@ export function createHandlers(env: Env): RouteHandlers {
       });
       if (result !== "completed") throw new ContractError("resource_not_found");
       if (refreshToken !== undefined) {
-        try {
-          await revokeGoogleTokenBestEffort({
+        ctx.waitUntil(
+          revokeGoogleTokenBestEffort({
             configuration: runtime.googleProvider,
             token: refreshToken,
             fetch: runtime.outboundFetch,
             timeoutMs: 5_000,
-          });
-        } catch {
-          // The deletion fence and local cascade are authoritative; revocation is best effort.
-        }
+          }).catch(() => undefined),
+        );
       }
       return undefined;
     },

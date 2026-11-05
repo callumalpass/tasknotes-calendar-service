@@ -1,17 +1,35 @@
 # Data classification and initial retention
 
-| Data                             | Class               |                               Initial retention | Notes                                                        |
-| -------------------------------- | ------------------- | ----------------------------------------------: | ------------------------------------------------------------ |
-| Google issuer and subject        | Identity-sensitive  |                          Until account deletion | Authoritative identity key; never a metric label             |
-| Email and display name           | Personal            |                          Until account deletion | Display only; not authorization                              |
-| Device session digest            | Credential verifier |                   30-day idle / 90-day absolute | Raw credential returned once and never persisted             |
-| OAuth transaction digests        | Security-sensitive  |           10 minutes plus bounded cleanup delay | No raw state, nonce, polling secret, or client verifier      |
-| Encrypted provider PKCE verifier | Secret ciphertext   |                            Transaction lifetime | Context-bound; deleted at terminal cleanup                   |
-| Google token envelope            | Secret ciphertext   | Until disconnect/deletion/reconnect replacement | Application-layer AEAD; no plaintext fallback                |
-| Calendar metadata                | Personal            |          Until disconnect/deletion; refreshable | Raw provider calendar ID remains server-side                 |
-| Live normalized event response   | Calendar content    |                                    Not retained | No event mirror, mapping table, or cache                     |
-| Event ID derivation key          | Secret              |    Environment lifetime; non-rotating by design | Dedicated key; compromise replacement changes all event IDs  |
-| Request/audit metadata           | Operational         |                               Define before LAB | Opaque internal IDs only; no email/event/provider token data |
+| Data                             | Class               |                                Initial retention | Notes                                                                                                                                                                                                                |
+| -------------------------------- | ------------------- | -----------------------------------------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Google issuer and subject        | Identity-sensitive  |                           Until account deletion | Authoritative identity key; never a metric label                                                                                                                                                                     |
+| Email and display name           | Personal            |                           Until account deletion | Display only; not authorization                                                                                                                                                                                      |
+| Device session digest            | Credential verifier | 30-day idle / 90-day absolute plus cleanup delay | Revoked or expired sessions are deleted hourly in batches of 100; raw credentials never persisted                                                                                                                    |
+| OAuth transaction digests        | Security-sensitive  |            10 minutes plus bounded cleanup delay | Hourly deletion of up to 100 expired rows, including pending/exchanging; no raw secrets                                                                                                                              |
+| Identity deletion fence digest   | Identity-sensitive  |                1 hour plus bounded cleanup delay | Keyed identity digest and deletion timestamp; hourly deletion of up to 100 fences older than 1 hour                                                                                                                  |
+| Encrypted provider PKCE verifier | Secret ciphertext   |                             Transaction lifetime | Context-bound; deleted at terminal cleanup                                                                                                                                                                           |
+| Google token envelope            | Secret ciphertext   |  Until disconnect/deletion/reconnect replacement | Application-layer AEAD; no plaintext fallback                                                                                                                                                                        |
+| Calendar metadata                | Personal            |           Until disconnect/deletion; refreshable | Raw provider calendar ID remains server-side                                                                                                                                                                         |
+| Live normalized event response   | Calendar content    |                                     Not retained | No event mirror, mapping table, or cache                                                                                                                                                                             |
+| Event ID derivation key          | Secret              |     Environment lifetime; non-rotating by design | Dedicated key; compromise replacement changes all event IDs                                                                                                                                                          |
+| Request/audit metadata           | Operational         |          Workers Logs: 3 days Free / 7 days Paid | Request UUID, route name, method, status, duration, error code, Retry-After; internal errors log class and stable location only. No paths, principal/IP/provider IDs or payloads; automatic invocation logs disabled |
 
 Retention values are implementation defaults, not permission to retain data in logs or backups.
-Backup and Cloudflare platform-retention behavior must be documented before real-user testing.
+Cloudflare Workers Logs retention is plan-dependent (3 days Free / 7 days Paid as of 2026-11-06).
+The account plan and backup/platform-retention behavior must be confirmed before real-user testing.
+
+Cleanup uses D1's clock. Without a backlog, eligible rows are removed at the next hourly run;
+backlogs above 100 eligible rows per table take additional runs. There is no hard cleanup-delay
+guarantee during backlog or scheduler failure. Deleting an expired OAuth transaction nulls a live
+session's redemption reference, not the session. Fences only reject transactions created before the
+deletion, whose 10-minute lifetime is below the 1-hour fence threshold. Accounts are never deleted
+for inactivity.
+
+`ALLOWED_ORIGINS` is an exact, comma-separated browser origin allow-list, empty by default in local
+and LAB. Set the real web-client origins explicitly before browser integration. Native Obsidian
+`requestUrl` bypasses browser CORS and needs no origin entry. WebView `fetch` does require its exact
+origin (for example `app://obsidian.md`, `capacitor://localhost`, or `http://localhost`) if used;
+Capacitor's native HTTP transport avoids that requirement; patching ordinary `fetch` to use it is
+disabled by default. Current Capacitor Android defaults to `https://localhost`, so configure the
+actual client origin rather than assuming `http://localhost`. These origins are supported as
+explicit configuration, not implicitly trusted defaults. CORS permits no credentials mode.

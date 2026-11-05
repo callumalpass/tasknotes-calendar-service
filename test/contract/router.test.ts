@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ROUTE_NAMES, type RouteName } from "../../src/contracts";
-import { ContractError, errorResponse } from "../../src/http/responses";
+import { MAX_JSON_BODY_BYTES, ROUTE_NAMES, type RouteName } from "../../src/contracts";
+import { ContractError, errorResponse, linkingResponse } from "../../src/http/responses";
+import type { Env } from "../../src/env";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
+
 import {
   createRouter,
   type RouteHandler,
@@ -55,11 +59,16 @@ const validOutputs: Readonly<Record<RouteName, unknown>> = {
   connections: { connections: [] },
   disconnect: undefined,
   calendars: { calendars: [] },
-  events: { events: [], next_cursor: null },
+  events: { events: [], next_cursor: null, omitted_count: 0 },
+  changes: { events: [], next_cursor: null, sync_cursor: "sealed", omitted_count: 0 },
+  createEvent: undefined,
+  getEvent: undefined,
+  patchEvent: undefined,
+  deleteEvent: undefined,
   devices: { devices: [] },
   revokeDevice: undefined,
   deleteAccount: undefined,
-  providerCallback: { status: "complete" },
+  providerCallback: linkingResponse({ status: "complete" }),
 };
 
 function handlers(overrides: Partial<Record<RouteName, RouteHandler>> = {}): RouteHandlers {
@@ -99,7 +108,12 @@ function router(
   routeHandlers: RouteHandlers = handlers(),
   authentication: RouterAuthentication = successfulAuthentication(),
 ): (request: Request) => Promise<Response> {
-  return createRouter(routeHandlers, authentication);
+  const dispatch = createRouter(routeHandlers, authentication, {
+    rateLimiter: (env as unknown as Env).API_RATE_LIMITER,
+    allowedOrigins: () => [],
+    publicOrigin: () => "https://calendar.test",
+  });
+  return (request) => dispatch(request, createExecutionContext());
 }
 
 function jsonRequest(
@@ -222,6 +236,73 @@ const authenticatedRouteCases: readonly {
 ];
 
 describe("contract router", () => {
+  it("requires If-Match before dispatching PATCH or DELETE and accepts the write contract", async () => {
+    const eventId = `e1_${"a".repeat(39)}`;
+    const event = {
+      id: eventId,
+      etag: '"1"',
+      calendar_id: id,
+      status: "confirmed",
+      title: "Created",
+      description: null,
+      location: null,
+      start: { kind: "date", date: "2026-11-06" },
+      end: { kind: "date", date: "2026-11-06" },
+      updated_at: instant,
+      recurrence: null,
+    };
+    const patch = vi.fn<RouteHandler>(() => Promise.resolve(event));
+    const remove = vi.fn<RouteHandler>(() => Promise.resolve(undefined));
+    const route = router(
+      handlers({
+        createEvent: () => Promise.resolve(event),
+        patchEvent: patch,
+        deleteEvent: remove,
+      }),
+    );
+    const path = `/v1/calendars/${id}/events/${eventId}`;
+    for (const method of ["PATCH", "DELETE"]) {
+      const request = authenticatedRequest(
+        path,
+        method === "PATCH"
+          ? {
+              method,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ title: "Changed" }),
+            }
+          : { method },
+      );
+      expect((await route(request)).status).toBe(400);
+    }
+    expect(patch).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    const request = authenticatedRequest(path, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "If-Match": '"1"' },
+      body: JSON.stringify({ title: "Changed" }),
+    });
+    expect((await route(request)).status).toBe(200);
+    expect(
+      (
+        await route(
+          authenticatedRequest(path, { method: "DELETE", headers: { "If-Match": '"1"' } }),
+        )
+      ).status,
+    ).toBe(204);
+    const created = await route(
+      authenticatedRequest(`/v1/calendars/${id}/events`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          idempotency_key: id,
+          start: event.start,
+          end: event.end,
+          description: "\u0000".repeat(16000),
+        }),
+      }),
+    );
+    expect(created.status).toBe(201);
+  });
   it("exact-matches method and path and returns a generic 404", async () => {
     const route = router();
     for (const request of [
@@ -291,11 +372,17 @@ describe("contract router", () => {
       ).status,
     ).toBe(415);
     expect(
-      (await route(jsonRequest("/v1/sign-in/start", { ...startBody, padding: "x".repeat(17_000) })))
-        .status,
+      (
+        await route(
+          jsonRequest("/v1/sign-in/start", {
+            ...startBody,
+            padding: "x".repeat(MAX_JSON_BODY_BYTES + 1),
+          }),
+        )
+      ).status,
     ).toBe(413);
 
-    for (const contentLength of ["invalid", "17000"]) {
+    for (const contentLength of ["invalid", String(MAX_JSON_BODY_BYTES + 1)]) {
       const request = jsonRequest("/v1/sign-in/start", startBody);
       request.headers.set("content-length", contentLength);
       expect((await route(request)).status).toBe(contentLength === "invalid" ? 400 : 413);
@@ -492,6 +579,7 @@ describe("contract router", () => {
           jsonRequest(`/v1/sign-in/${transactionId}/redeem`, {
             polling_secret: pollingSecret,
             code_verifier: "v".repeat(43),
+            confirmation_code: "23456789",
           }),
       ],
       [
@@ -568,7 +656,8 @@ describe("contract router", () => {
   it("validates event tombstones and contains invalid event handler output", async () => {
     const path = `/v1/calendars/${id}/events?start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z`;
     const tombstone = {
-      id,
+      id: `e1_${"a".repeat(39)}`,
+      etag: null,
       calendar_id: id,
       status: "cancelled",
       title: null,
@@ -580,10 +669,16 @@ describe("contract router", () => {
       recurrence: null,
     };
     const valid = await router(
-      handlers({ events: () => Promise.resolve({ events: [tombstone], next_cursor: null }) }),
+      handlers({
+        events: () => Promise.resolve({ events: [tombstone], next_cursor: null, omitted_count: 0 }),
+      }),
     )(authenticatedRequest(path));
     expect(valid.status).toBe(200);
-    await expect(valid.json()).resolves.toEqual({ events: [tombstone], next_cursor: null });
+    await expect(valid.json()).resolves.toEqual({
+      events: [tombstone],
+      next_cursor: null,
+      omitted_count: 0,
+    });
 
     const invalid = await router(
       handlers({

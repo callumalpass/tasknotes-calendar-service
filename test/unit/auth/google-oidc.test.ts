@@ -22,7 +22,8 @@ const NOW = 2_000_000_000;
 const KID = "fixture-key-1";
 const NONCE = "transaction-nonce";
 const NONCE_HASH = "cOkxTHbZOikKdhfVbLdzHLLr4ubBUOTkYe3fZa_sxN4";
-const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+const CALENDAR_SCOPE =
+  "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly";
 const endpoints: GoogleOidcEndpoints = googleOidcTestEndpoints({
   authorizationEndpoint: "http://127.0.0.1:9797/authorize",
   tokenEndpoint: "http://127.0.0.1:9797/token",
@@ -157,15 +158,16 @@ describe("Google authorization URLs", () => {
       nonce: authorization.nonce,
       code_challenge: authorization.codeChallenge,
       code_challenge_method: "S256",
+      prompt: "select_account",
     });
     expect(url.searchParams.has("access_type")).toBe(false);
-    expect(url.searchParams.has("prompt")).toBe(false);
+    expect(url.searchParams.get("prompt")).toBe("select_account");
   });
 
   it("constructs explicit calendar consent with identity, read-only, and offline parameters", () => {
     const url = createGoogleCalendarAuthorizationUrl(endpoints, client, {
       ...authorization,
-      calendarScopes: [CALENDAR_SCOPE],
+      calendarScopes: CALENDAR_SCOPE.split(" "),
     });
     expect(url.searchParams.get("scope")).toBe(`openid email profile ${CALENDAR_SCOPE}`);
     expect(url.searchParams.get("access_type")).toBe("offline");
@@ -420,7 +422,7 @@ describe("calendar connection exchange", () => {
       {
         ...exchangeInput,
         expectedSubject: "google-subject-123",
-        requiredCalendarScopes: [CALENDAR_SCOPE],
+        requiredCalendarScopes: CALENDAR_SCOPE.split(" "),
       },
       dependencies(jsonResponse(await calendarTokenPayload())),
     );
@@ -428,7 +430,7 @@ describe("calendar connection exchange", () => {
       accessToken: "access-secret",
       refreshToken: "refresh-secret",
       expiresInSeconds: 3_600,
-      scopes: ["openid", "email", "profile", CALENDAR_SCOPE],
+      scopes: ["openid", "email", "profile", ...CALENDAR_SCOPE.split(" ")],
     });
   });
 
@@ -440,7 +442,7 @@ describe("calendar connection exchange", () => {
         exchangeGoogleCalendarCode(
           endpoints,
           client,
-          { ...exchangeInput, expectedSubject, requiredCalendarScopes: [CALENDAR_SCOPE] },
+          { ...exchangeInput, expectedSubject, requiredCalendarScopes: CALENDAR_SCOPE.split(" ") },
           deps,
         ),
         "invalid_request",
@@ -457,7 +459,7 @@ describe("calendar connection exchange", () => {
         {
           ...exchangeInput,
           expectedSubject: "different-subject",
-          requiredCalendarScopes: [CALENDAR_SCOPE],
+          requiredCalendarScopes: CALENDAR_SCOPE.split(" "),
         },
         dependencies(jsonResponse(await calendarTokenPayload())),
       ),
@@ -475,7 +477,7 @@ describe("calendar connection exchange", () => {
         {
           ...exchangeInput,
           expectedSubject: "google-subject-123",
-          requiredCalendarScopes: [CALENDAR_SCOPE],
+          requiredCalendarScopes: CALENDAR_SCOPE.split(" "),
         },
         dependencies(jsonResponse(payload)),
       ),
@@ -490,7 +492,7 @@ describe("calendar connection exchange", () => {
       {
         ...exchangeInput,
         expectedSubject: "google-subject-123",
-        requiredCalendarScopes: [CALENDAR_SCOPE],
+        requiredCalendarScopes: CALENDAR_SCOPE.split(" "),
       },
       dependencies(
         jsonResponse(
@@ -500,7 +502,12 @@ describe("calendar connection exchange", () => {
         ),
       ),
     );
-    expect(aliased.tokenMaterial.scopes).toEqual(["openid", "email", "profile", CALENDAR_SCOPE]);
+    expect(aliased.tokenMaterial.scopes).toEqual([
+      "openid",
+      "email",
+      "profile",
+      ...CALENDAR_SCOPE.split(" "),
+    ]);
 
     await expectCode(
       exchangeGoogleCalendarCode(
@@ -509,12 +516,12 @@ describe("calendar connection exchange", () => {
         {
           ...exchangeInput,
           expectedSubject: "google-subject-123",
-          requiredCalendarScopes: [CALENDAR_SCOPE],
+          requiredCalendarScopes: CALENDAR_SCOPE.split(" "),
         },
         dependencies(
           jsonResponse(
             await calendarTokenPayload({
-              scope: `openid email profile ${CALENDAR_SCOPE} https://www.googleapis.com/auth/calendar.events`,
+              scope: `openid email profile ${CALENDAR_SCOPE} https://www.googleapis.com/auth/calendar`,
             }),
           ),
         ),
@@ -535,7 +542,7 @@ describe("calendar connection exchange", () => {
         {
           ...exchangeInput,
           expectedSubject: "google-subject-123",
-          requiredCalendarScopes: [CALENDAR_SCOPE],
+          requiredCalendarScopes: CALENDAR_SCOPE.split(" "),
         },
         dependencies(jsonResponse(await calendarTokenPayload({ scope }))),
       ),

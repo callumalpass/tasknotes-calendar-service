@@ -1,4 +1,5 @@
 import { decodeBase64Url, encodeBase64Url } from "./base64url";
+import { asArrayBuffer } from "./digest";
 import { randomBytes, webCryptoRandom } from "./random";
 import type { RandomByteSource } from "./random";
 
@@ -23,6 +24,90 @@ export interface EventCursorBinding {
   readonly rangeEnd: string;
 }
 
+export type SyncCursorBinding = Omit<EventCursorBinding, "rangeStart" | "rangeEnd">;
+export interface SyncCursorPayload {
+  readonly syncToken?: string;
+  readonly pageToken?: string;
+}
+
+function syncAssociatedData(binding: SyncCursorBinding): Uint8Array {
+  validateBinding({ ...binding, rangeStart: "unused", rangeEnd: "unused" });
+  return textEncoder.encode(JSON.stringify({ version: 1, purpose: "event-sync", ...binding }));
+}
+
+export async function sealSyncCursor(
+  payload: SyncCursorPayload,
+  binding: SyncCursorBinding,
+  rawKey: Uint8Array,
+  random: RandomByteSource = webCryptoRandom,
+): Promise<string> {
+  if (payload.syncToken !== undefined) assertPageToken(payload.syncToken);
+  if (payload.pageToken !== undefined) assertPageToken(payload.pageToken);
+  if (payload.syncToken === undefined && payload.pageToken === undefined) throw new CursorError();
+  const iv = randomBytes(random, IV_BYTES);
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: asArrayBuffer(iv),
+        additionalData: asArrayBuffer(syncAssociatedData(binding)),
+      },
+      await importKey(rawKey),
+      textEncoder.encode(JSON.stringify(payload)),
+    ),
+  );
+  return `s1.${encodeBase64Url(iv)}.${encodeBase64Url(ciphertext)}`;
+}
+
+export async function openSyncCursor(
+  cursor: string,
+  binding: SyncCursorBinding,
+  rawKey: Uint8Array,
+): Promise<SyncCursorPayload> {
+  try {
+    if (cursor.length > 4096) throw new CursorError();
+    const parts = cursor.split(".");
+    if (parts.length !== 3 || parts[0] !== "s1") throw new CursorError();
+    const iv = decodeBase64Url(parts[1] ?? "", { minBytes: IV_BYTES, maxBytes: IV_BYTES });
+    const ciphertext = decodeBase64Url(parts[2] ?? "", { minBytes: TAG_BYTES + 1, maxBytes: 3072 });
+    const value: unknown = JSON.parse(
+      textDecoder.decode(
+        await crypto.subtle.decrypt(
+          {
+            name: "AES-GCM",
+            iv: asArrayBuffer(iv),
+            additionalData: asArrayBuffer(syncAssociatedData(binding)),
+          },
+          await importKey(rawKey),
+          asArrayBuffer(ciphertext),
+        ),
+      ),
+    );
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new CursorError();
+    const payload = value as Record<string, unknown>;
+    if (Object.keys(payload).some((key) => key !== "syncToken" && key !== "pageToken"))
+      throw new CursorError();
+    const syncToken = payload["syncToken"];
+    const pageToken = payload["pageToken"];
+    if (syncToken === undefined && pageToken === undefined) throw new CursorError();
+    if (syncToken !== undefined) {
+      if (typeof syncToken !== "string") throw new CursorError();
+      assertPageToken(syncToken);
+    }
+    if (pageToken !== undefined) {
+      if (typeof pageToken !== "string") throw new CursorError();
+      assertPageToken(pageToken);
+    }
+    return {
+      ...(syncToken === undefined ? {} : { syncToken }),
+      ...(pageToken === undefined ? {} : { pageToken }),
+    };
+  } catch {
+    throw new CursorError();
+  }
+}
+
 interface EventCursorPayload {
   readonly pageToken: string;
   readonly expiresAtEpochSeconds: number;
@@ -33,10 +118,6 @@ export class CursorError extends Error {
     super("cursor is invalid or expired");
     this.name = "CursorError";
   }
-}
-
-function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(bytes).buffer;
 }
 
 function assertBoundedText(value: string, name: string, maximumBytes: number): void {

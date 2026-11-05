@@ -7,6 +7,12 @@ import {
   UuidSchema,
 } from "./common";
 import {
+  ChangesQuerySchema,
+  ChangesResponseSchema,
+  CreateEventRequestSchema,
+  PatchEventRequestSchema,
+  EventSchema,
+  EventIdSchema,
   CalendarsResponseSchema,
   ConnectionsResponseSchema,
   DevicesResponseSchema,
@@ -18,6 +24,7 @@ import {
   ConnectRedeemResponseSchema,
   ProviderCallbackQuerySchema,
   SignInRedeemResponseSchema,
+  SignInRedeemRequestSchema,
   TransactionRedeemRequestSchema,
   TransactionStartRequestSchema,
   TransactionStartResponseSchema,
@@ -26,7 +33,7 @@ import {
 } from "./transactions";
 
 export const HealthResponseSchema = z.strictObject({ status: z.enum(["ok", "ready"]) });
-export const CallbackResponseSchema = z.strictObject({ status: z.literal("complete") });
+export const CallbackResponseSchema = z.instanceof(Response);
 
 export const ROUTE_NAMES = [
   "healthLive",
@@ -42,6 +49,11 @@ export const ROUTE_NAMES = [
   "disconnect",
   "calendars",
   "events",
+  "changes",
+  "createEvent",
+  "getEvent",
+  "patchEvent",
+  "deleteEvent",
   "devices",
   "revokeDevice",
   "deleteAccount",
@@ -49,14 +61,16 @@ export const ROUTE_NAMES = [
 ] as const;
 
 export type RouteName = (typeof ROUTE_NAMES)[number];
-export type HttpMethod = "GET" | "POST" | "DELETE";
+export type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
 export interface RouteDefinition {
   readonly name: RouteName;
   readonly method: HttpMethod;
   readonly path: string;
   readonly authenticated: boolean;
+  readonly rateLimit: "none" | "ip" | "principal";
   readonly body?: z.ZodType;
+  readonly requiredHeaders?: readonly string[];
   readonly query: z.ZodType;
   readonly params: Readonly<Record<string, z.ZodType>>;
   readonly response?: z.ZodType;
@@ -72,6 +86,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "GET",
     path: "/health/live",
     authenticated: false,
+    rateLimit: "none",
     query: EmptyObjectSchema,
     params: noParams,
     response: HealthResponseSchema,
@@ -82,6 +97,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "GET",
     path: "/health/ready",
     authenticated: false,
+    rateLimit: "none",
     query: EmptyObjectSchema,
     params: noParams,
     response: HealthResponseSchema,
@@ -92,6 +108,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "POST",
     path: "/v1/sign-in/start",
     authenticated: false,
+    rateLimit: "ip",
     body: TransactionStartRequestSchema,
     query: EmptyObjectSchema,
     params: noParams,
@@ -103,6 +120,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "POST",
     path: "/v1/sign-in/{transaction_id}/status",
     authenticated: false,
+    rateLimit: "ip",
     body: TransactionStatusRequestSchema,
     query: EmptyObjectSchema,
     params: transactionParams,
@@ -114,7 +132,8 @@ export const routes: readonly RouteDefinition[] = [
     method: "POST",
     path: "/v1/sign-in/{transaction_id}/redeem",
     authenticated: false,
-    body: TransactionRedeemRequestSchema,
+    rateLimit: "ip",
+    body: SignInRedeemRequestSchema,
     query: EmptyObjectSchema,
     params: transactionParams,
     response: SignInRedeemResponseSchema,
@@ -125,6 +144,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "POST",
     path: "/v1/connections/google/start",
     authenticated: true,
+    rateLimit: "principal",
     body: TransactionStartRequestSchema,
     query: EmptyObjectSchema,
     params: noParams,
@@ -136,6 +156,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "POST",
     path: "/v1/connections/google/{transaction_id}/status",
     authenticated: true,
+    rateLimit: "principal",
     body: TransactionStatusRequestSchema,
     query: EmptyObjectSchema,
     params: transactionParams,
@@ -147,6 +168,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "POST",
     path: "/v1/connections/google/{transaction_id}/redeem",
     authenticated: true,
+    rateLimit: "principal",
     body: TransactionRedeemRequestSchema,
     query: EmptyObjectSchema,
     params: transactionParams,
@@ -158,6 +180,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "GET",
     path: "/v1/session",
     authenticated: true,
+    rateLimit: "principal",
     query: EmptyObjectSchema,
     params: noParams,
     response: SessionSchema,
@@ -168,6 +191,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "GET",
     path: "/v1/connections",
     authenticated: true,
+    rateLimit: "principal",
     query: EmptyObjectSchema,
     params: noParams,
     response: ConnectionsResponseSchema,
@@ -178,6 +202,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "DELETE",
     path: "/v1/connections/{connection_id}",
     authenticated: true,
+    rateLimit: "principal",
     query: EmptyObjectSchema,
     params: { connection_id: UuidSchema },
     successStatus: 204,
@@ -187,6 +212,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "GET",
     path: "/v1/calendars",
     authenticated: true,
+    rateLimit: "principal",
     query: EmptyObjectSchema,
     params: noParams,
     response: CalendarsResponseSchema,
@@ -197,16 +223,76 @@ export const routes: readonly RouteDefinition[] = [
     method: "GET",
     path: "/v1/calendars/{calendar_id}/events",
     authenticated: true,
+    rateLimit: "principal",
     query: EventsQuerySchema,
     params: { calendar_id: UuidSchema },
     response: EventsResponseSchema,
     successStatus: 200,
   },
   {
+    name: "changes",
+    method: "GET",
+    path: "/v1/calendars/{calendar_id}/changes",
+    authenticated: true,
+    rateLimit: "principal",
+    query: ChangesQuerySchema,
+    params: { calendar_id: UuidSchema },
+    response: ChangesResponseSchema,
+    successStatus: 200,
+  },
+  {
+    name: "createEvent",
+    method: "POST",
+    path: "/v1/calendars/{calendar_id}/events",
+    authenticated: true,
+    rateLimit: "principal",
+    query: EmptyObjectSchema,
+    params: { calendar_id: UuidSchema },
+    body: CreateEventRequestSchema,
+    response: EventSchema,
+    successStatus: 201,
+  },
+  {
+    name: "getEvent",
+    method: "GET",
+    path: "/v1/calendars/{calendar_id}/events/{event_id}",
+    authenticated: true,
+    rateLimit: "principal",
+    query: EmptyObjectSchema,
+    params: { calendar_id: UuidSchema, event_id: EventIdSchema },
+    response: EventSchema,
+    successStatus: 200,
+  },
+  {
+    name: "patchEvent",
+    method: "PATCH",
+    path: "/v1/calendars/{calendar_id}/events/{event_id}",
+    authenticated: true,
+    rateLimit: "principal",
+    query: EmptyObjectSchema,
+    params: { calendar_id: UuidSchema, event_id: EventIdSchema },
+    body: PatchEventRequestSchema,
+    response: EventSchema,
+    requiredHeaders: ["If-Match"],
+    successStatus: 200,
+  },
+  {
+    name: "deleteEvent",
+    method: "DELETE",
+    path: "/v1/calendars/{calendar_id}/events/{event_id}",
+    authenticated: true,
+    rateLimit: "principal",
+    query: EmptyObjectSchema,
+    params: { calendar_id: UuidSchema, event_id: EventIdSchema },
+    requiredHeaders: ["If-Match"],
+    successStatus: 204,
+  },
+  {
     name: "devices",
     method: "GET",
     path: "/v1/devices",
     authenticated: true,
+    rateLimit: "principal",
     query: EmptyObjectSchema,
     params: noParams,
     response: DevicesResponseSchema,
@@ -217,6 +303,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "DELETE",
     path: "/v1/devices/{device_id}",
     authenticated: true,
+    rateLimit: "principal",
     query: EmptyObjectSchema,
     params: { device_id: DeviceSessionIdSchema },
     successStatus: 204,
@@ -226,6 +313,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "DELETE",
     path: "/v1/account",
     authenticated: true,
+    rateLimit: "principal",
     query: EmptyObjectSchema,
     params: noParams,
     successStatus: 204,
@@ -235,6 +323,7 @@ export const routes: readonly RouteDefinition[] = [
     method: "GET",
     path: "/oauth/google/callback",
     authenticated: false,
+    rateLimit: "none",
     query: ProviderCallbackQuerySchema,
     params: noParams,
     response: CallbackResponseSchema,

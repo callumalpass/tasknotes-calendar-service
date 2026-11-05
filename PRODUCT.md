@@ -9,9 +9,10 @@ authorization.
 
 ## Initial outcome
 
-A person can authorize Google, list their calendars, and read a bounded event range from another
-TaskNotes client authenticated as the same immutable Google identity. Google credentials remain
-encrypted in the service and never enter TaskNotes clients or mdbase collections.
+A person can authorize Google once and, from any TaskNotes client authenticated as the same
+immutable Google identity, list their calendars, read bounded or incremental event pages, and
+create, update, or delete events. Clients own task-to-event mapping and sync logic. Google
+credentials remain encrypted in the service and never enter TaskNotes clients or mdbase collections.
 
 ## Principles
 
@@ -19,8 +20,8 @@ encrypted in the service and never enter TaskNotes clients or mdbase collections
    is display text only.
 2. **One authority check.** Every object and provider operation is authorized from the current
    TaskNotes service principal before lookup or cache use.
-3. **Provider data remains authoritative.** Event pages are bounded live reads and are not mirrored
-   or cached.
+3. **Provider data remains authoritative.** Reads and writes are live provider calls. Events are not
+   mirrored or cached.
 4. **Revocation wins.** Disconnect and deletion immediately invalidate sessions and dominate delayed
    work.
 5. **Background work is explicit.** Webhooks, queues, cursors, and retries use versioned state
@@ -30,11 +31,11 @@ encrypted in the service and never enter TaskNotes clients or mdbase collections
 7. **Free does not mean unbounded.** Apply transparent range, rate, storage, and inactivity limits
    to preserve fair access.
 
-## Non-goals for the first vertical slice
+## Non-goals
 
 - Microsoft Calendar
-- Event creation, updates, or deletion
-- Automatic task-to-event synchronization
+- Server-side task-to-event synchronization, webhooks, or background sync
+- Storing task data or task-to-event mappings in the service
 - Persistent full-calendar mirroring
 - Writing external events into mdbase collections
 - mdbase subscription-based entitlement

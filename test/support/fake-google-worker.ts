@@ -5,20 +5,21 @@ const FAKE_GOOGLE_CLIENT_ID = "local-fake-google-client";
 const FAKE_GOOGLE_CLIENT_SECRET = "test-only-fake-google-secret";
 const FAKE_GOOGLE_REDIRECT_URI = "http://127.0.0.1:8787/oauth/google/callback";
 const FAKE_GOOGLE_KID = "test-only-fake-google-rs256-1";
-const FAKE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+const FAKE_CALENDAR_SCOPE =
+  "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly";
 
 const CONTROL_ORIGIN = "https://fake-google-control.test";
 const CANONICAL_ISSUER = "https://accounts.google.com";
 const IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
 const MAX_FORM_BYTES = 8_192;
-const MAX_CONTROL_BYTES = 262_144;
+const MAX_CONTROL_BYTES = 4 * 1024 * 1024;
 const MAX_VALUE_BYTES = 2_048;
 const MAX_ITEMS = 250;
 const MAX_PAGE_TOKEN_BYTES = 1_024;
 const CALENDAR_LIST_FIELDS =
   "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)";
 const EVENTS_FIELDS =
-  "nextPageToken,items(id,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))";
+  "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))";
 const STATIC_ACCESS_TOKEN = "fake-access";
 const INITIAL_REFRESH_TOKEN = "fake-refresh-token-000000000000000000001";
 const encoder = new TextEncoder();
@@ -56,6 +57,7 @@ type FakeTokenMode =
   | "wrong_azp"
   | "wrong_signature"
   | "expired"
+  | "granted_calendar_scopes"
   | "omitted_scope"
   | "writable_scope"
   | "missing_refresh_token"
@@ -261,20 +263,20 @@ function authorize(request: Request, url: URL): Response {
     "code_challenge",
     "code_challenge_method",
   ];
-  const hasOffline = url.searchParams.has("access_type") || url.searchParams.has("prompt");
-  const names = hasOffline ? [...base, "access_type", "prompt"] : base;
+  const hasOffline = url.searchParams.has("access_type");
+  const names = hasOffline ? [...base, "access_type", "prompt"] : [...base, "prompt"];
   if (!exactParameters(url.searchParams, names)) return reject(400);
   const get = (name: string): string => url.searchParams.get(name) ?? "";
   const scope = get("scope").split(" ");
-  const calendar = scope.includes(FAKE_CALENDAR_SCOPE);
+  const calendar = FAKE_CALENDAR_SCOPE.split(" ").every((item) => scope.includes(item));
   const validScopes =
-    scope.length === (calendar ? 4 : 3) &&
+    scope.length === (calendar ? 5 : 3) &&
     new Set(scope).size === scope.length &&
     IDENTITY_SCOPES.every((item) => scope.includes(item)) &&
     scope.every(
       (item) =>
         IDENTITY_SCOPES.includes(item as (typeof IDENTITY_SCOPES)[number]) ||
-        item === FAKE_CALENDAR_SCOPE,
+        FAKE_CALENDAR_SCOPE.split(" ").includes(item),
     );
   if (
     get("client_id") !== FAKE_GOOGLE_CLIENT_ID ||
@@ -285,6 +287,7 @@ function authorize(request: Request, url: URL): Response {
     !bounded(get("nonce")) ||
     !/^[A-Za-z0-9_-]{43}$/u.test(get("code_challenge")) ||
     get("code_challenge_method") !== "S256" ||
+    (!hasOffline && get("prompt") !== "select_account") ||
     (hasOffline && (!calendar || get("access_type") !== "offline" || get("prompt") !== "consent"))
   )
     return reject(400);
@@ -396,7 +399,7 @@ async function authorizationCodeToken(form: URLSearchParams): Promise<Response> 
   }
 
   const now = Math.floor(Date.now() / 1_000);
-  const calendar = record.scopes.includes(FAKE_CALENDAR_SCOPE);
+  const calendar = FAKE_CALENDAR_SCOPE.split(" ").every((item) => record.scopes.includes(item));
   const issuer =
     mode === "wrong_issuer"
       ? "https://attacker.invalid"
@@ -427,7 +430,9 @@ async function authorizationCodeToken(form: URLSearchParams): Promise<Response> 
     response["scope"] =
       mode === "writable_scope"
         ? `${record.scopes.join(" ")} https://www.googleapis.com/auth/calendar`
-        : record.scopes.join(" ");
+        : mode === "granted_calendar_scopes"
+          ? `${record.scopes.join(" ")} ${FAKE_CALENDAR_SCOPE}`
+          : record.scopes.join(" ");
   if (calendar && mode !== "missing_refresh_token") {
     response["refresh_token"] = INITIAL_REFRESH_TOKEN;
     refreshRecords.set(INITIAL_REFRESH_TOKEN, {
@@ -621,14 +626,14 @@ function calendarFault(mode: FakeCalendarMode): Response | undefined {
 
 async function calendar(request: Request, url: URL): Promise<Response> {
   if (!configuration.calendarEnabled) return reject(404);
-  if (request.method !== "GET") return reject(405);
   if (!authorizedCalendarRequest(request)) return reject(401);
 
   const list = url.pathname === "/calendar/v3/users/me/calendarList";
-  const match = /^\/calendar\/v3\/calendars\/([^/]+)\/events$/u.exec(url.pathname);
+  const match = /^\/calendar\/v3\/calendars\/([^/]+)\/events(?:\/([^/]+))?$/u.exec(url.pathname);
   if (!list && match === null) return reject(404);
   const pageToken = url.searchParams.get("pageToken");
   if (list) {
+    if (request.method !== "GET") return reject(405);
     const names =
       pageToken === null ? ["maxResults", "fields"] : ["maxResults", "fields", "pageToken"];
     if (
@@ -656,41 +661,145 @@ async function calendar(request: Request, url: URL): Promise<Response> {
     return reject(400);
   }
   if (!boundedOpaque(calendarId, 4_096)) return reject(400);
-  const names = [
-    "maxResults",
-    "singleEvents",
-    "showDeleted",
-    "orderBy",
-    "timeMin",
-    "timeMax",
-    "fields",
-    ...(pageToken === null ? [] : ["pageToken"]),
-  ];
-  if (
-    !exactParameters(url.searchParams, names) ||
-    url.searchParams.get("maxResults") !== "250" ||
-    url.searchParams.get("singleEvents") !== "true" ||
-    url.searchParams.get("showDeleted") !== "true" ||
-    url.searchParams.get("orderBy") !== "startTime" ||
-    url.searchParams.get("fields") !== EVENTS_FIELDS ||
-    !bounded(url.searchParams.get("timeMin") ?? "", 64) ||
-    !bounded(url.searchParams.get("timeMax") ?? "", 64)
-  )
-    return reject(400);
+  const providerId = match?.[2] === undefined ? undefined : decodeURIComponent(match[2]);
   const pages = configuration.eventPages.filter((page) => page.calendarId === calendarId);
-  const page = selectedPage(pages, pageToken);
-  if (page === undefined) return reject(404);
+  if (pages.length === 0) return reject(404);
   stats.calendarCalls += 1;
   stats.eventCalls += 1;
   const mode = configuration.calendar;
   configuration.calendar = "success";
-  return (
-    calendarFault(mode) ??
-    json({
-      items: page.items,
-      ...(page.nextPageToken === undefined ? {} : { nextPageToken: page.nextPageToken }),
-    })
-  );
+  const fault = calendarFault(mode);
+  if (fault !== undefined) return fault;
+  if (configuration.calendarDelayMs > 0)
+    await new Promise((resolve) => setTimeout(resolve, configuration.calendarDelayMs));
+  if (providerId !== undefined || request.method === "POST") {
+    const fields = EVENTS_FIELDS.slice("nextPageToken,items(".length, -1);
+    if (request.method !== "GET" && url.searchParams.get("sendUpdates") !== "none")
+      return reject(400);
+    if (request.method !== "DELETE" && url.searchParams.get("fields") !== fields)
+      return reject(400);
+    let event = pages.flatMap((page) => page.items).find((item) => item["id"] === providerId);
+    if (request.method === "POST") {
+      const body: unknown = await request.json();
+      if (
+        !recordWithKeys(body, [
+          "id",
+          "summary",
+          "description",
+          "location",
+          "start",
+          "end",
+          "transparency",
+          "recurrence",
+        ]) ||
+        typeof body["id"] !== "string" ||
+        !/^[0-9a-v]{5,1024}$/u.test(body["id"])
+      )
+        return reject(400);
+      if (pages.some((page) => page.items.some((item) => item["id"] === body["id"])))
+        return json({ error: { code: 409 } }, 409);
+      event = { ...body, status: "confirmed", updated: "2026-11-06T00:00:00Z", etag: '"1"' };
+      pages[0]?.items.push(event);
+      return json(event, 200);
+    }
+    if (event === undefined) return reject(404);
+    if (request.method === "GET") return json(event);
+    if (event["status"] === "cancelled") return json({ error: { code: 410 } }, 410);
+    if (request.headers.get("If-Match") !== event["etag"])
+      return json({ error: { code: 412 } }, 412);
+    if (request.method === "DELETE") {
+      const id = event["id"];
+      for (const page of pages)
+        page.items = page.items.map((item) =>
+          item === event ? { id, status: "cancelled" } : item,
+        );
+      return new Response(null, { status: 204 });
+    }
+    if (request.method !== "PATCH") return reject(405);
+    const body: unknown = await request.json();
+    if (
+      !recordWithKeys(body, [
+        "summary",
+        "description",
+        "location",
+        "start",
+        "end",
+        "transparency",
+        "recurrence",
+      ])
+    )
+      return reject(400);
+    const merged = {
+      ...body,
+      ...(body["start"] === undefined
+        ? {}
+        : { start: mergeBoundary(event["start"], body["start"]) }),
+      ...(body["end"] === undefined ? {} : { end: mergeBoundary(event["end"], body["end"]) }),
+    };
+    if (
+      [merged.start, merged.end].some(
+        (value) => isRecord(value) && "date" in value && "dateTime" in value,
+      )
+    )
+      return reject(400);
+    Object.assign(event, merged, {
+      etag: `"${Number(String(event["etag"]).replaceAll('"', "")) + 1}"`,
+      updated: "2026-11-06T00:00:01Z",
+    });
+    return json(event);
+  }
+  if (request.method !== "GET") return reject(405);
+  const changes = url.searchParams.get("showDeleted") === "true";
+  const names = [
+    "maxResults",
+    "singleEvents",
+    "fields",
+    ...(pageToken === null ? [] : ["pageToken"]),
+    ...(changes
+      ? ["showDeleted", ...(url.searchParams.has("syncToken") ? ["syncToken"] : [])]
+      : ["orderBy", "timeMin", "timeMax"]),
+  ];
+  if (
+    !exactParameters(url.searchParams, names) ||
+    url.searchParams.get("maxResults") !== "250" ||
+    url.searchParams.get("singleEvents") !== (changes ? "false" : "true") ||
+    url.searchParams.get("fields") !== (changes ? `nextSyncToken,${EVENTS_FIELDS}` : EVENTS_FIELDS)
+  )
+    return reject(400);
+  if (
+    !changes &&
+    (url.searchParams.get("orderBy") !== "startTime" ||
+      !bounded(url.searchParams.get("timeMin") ?? "", 64) ||
+      !bounded(url.searchParams.get("timeMax") ?? "", 64))
+  )
+    return reject(400);
+  if (
+    changes &&
+    url.searchParams.has("syncToken") &&
+    url.searchParams.get("syncToken") !== "fake-sync-current"
+  )
+    return json({ error: { code: 410 } }, 410);
+  const page = selectedPage(pages, pageToken);
+  if (page === undefined) return reject(400);
+  return json({
+    items: changes
+      ? page.items.map((item) => (item["status"] === "cancelled" ? { id: item["id"] } : item))
+      : page.items.filter((item) => item["status"] !== "cancelled"),
+    ...(page.nextPageToken === undefined
+      ? changes
+        ? { nextSyncToken: "fake-sync-current" }
+        : {}
+      : { nextPageToken: page.nextPageToken }),
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mergeBoundary(current: unknown, patch: unknown): Record<string, unknown> {
+  const merged = { ...(isRecord(current) ? current : {}), ...(isRecord(patch) ? patch : {}) };
+  return Object.fromEntries(Object.entries(merged).filter(([, value]) => value !== null));
 }
 
 function recordWithKeys(
@@ -748,11 +857,13 @@ function validCalendarItem(value: unknown): value is Record<string, unknown> {
   );
 }
 function validEventItem(value: unknown): value is Record<string, unknown> {
+  if (recordWithKeys(value, ["id"]) && boundedOpaque(value["id"], 4096)) return true;
   if (
     !recordWithKeys(value, [
       "id",
       "status",
       "updated",
+      "etag",
       "summary",
       "description",
       "location",
@@ -766,8 +877,8 @@ function validEventItem(value: unknown): value is Record<string, unknown> {
     return false;
   return (
     boundedOpaque(value["id"], 4_096) &&
-    typeof value["updated"] === "string" &&
-    bounded(value["updated"], 64) &&
+    optionalString(value["updated"], 64) &&
+    optionalString(value["etag"], 256) &&
     ["confirmed", "tentative", "cancelled"].includes(String(value["status"])) &&
     optionalString(value["summary"], 2_048) &&
     optionalString(value["description"], 32_768) &&
@@ -823,6 +934,7 @@ function validConfiguration(value: unknown): value is FakeGoogleConfiguration {
     "wrong_azp",
     "wrong_signature",
     "expired",
+    "granted_calendar_scopes",
     "omitted_scope",
     "writable_scope",
     "missing_refresh_token",

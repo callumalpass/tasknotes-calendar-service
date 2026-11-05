@@ -1,6 +1,6 @@
 # ADR 0001: Service boundary and first vertical slice
 
-- Status: Accepted
+- Status: Accepted, amended by ADR 0005 (provider writes, incremental reads, scopes)
 - Date: 2026-08-30
 
 ## Decision

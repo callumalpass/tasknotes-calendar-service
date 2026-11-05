@@ -45,7 +45,11 @@ export interface RouterAuthentication {
   } | null>;
 }
 
-export type RouteHandler = (input: RouteInput, request: Request) => Promise<unknown>;
+export type RouteHandler = (
+  input: RouteInput,
+  request: Request,
+  ctx: ExecutionContext,
+) => Promise<unknown>;
 export type RouteHandlers = Readonly<Record<RouteName, RouteHandler>>;
 
 class InvalidInputError extends Error {
@@ -104,11 +108,10 @@ async function authenticate(
   return Object.freeze({ principalId: result.principalId, sessionId: session.id, session });
 }
 
-function parseQuery(url: URL): Record<string, string> {
-  const parsed: Record<string, string> = {};
+function parseQuery(url: URL): Record<string, string | string[]> {
+  const parsed: Record<string, string | string[]> = {};
   for (const [key, value] of url.searchParams) {
-    if (Object.hasOwn(parsed, key)) throw new InvalidInputError("invalid_request");
-    parsed[key] = value;
+    parsed[key] = Object.hasOwn(parsed, key) ? [...url.searchParams.getAll(key)] : value;
   }
   return parsed;
 }
@@ -217,14 +220,40 @@ async function dispatch(
   request: Request,
   handlers: RouteHandlers,
   authentication: RouterAuthentication,
+  rateLimiter: RateLimit,
+  ctx: ExecutionContext,
 ): Promise<Response> {
   const authenticated = route.definition.authenticated
     ? await authenticate(request, authentication)
     : undefined;
+  if (route.definition.rateLimit !== "none") {
+    const key =
+      authenticated === undefined
+        ? `ip:${request.headers.get("cf-connecting-ip") ?? ""}`
+        : `principal:${authenticated.principalId}`;
+    let success: boolean;
+    try {
+      ({ success } = await rateLimiter.limit({ key }));
+    } catch {
+      // Fail closed: an unavailable abuse boundary must not expose unbounded OAuth/provider work.
+      throw new ContractError("dependency_unavailable", 60);
+    }
+    if (!success) throw new ContractError("rate_limited", 60);
+  }
   const url = new URL(request.url);
   const queryResult = route.definition.query.safeParse(parseQuery(url));
   if (!queryResult.success) throw new InvalidInputError("invalid_request");
 
+  for (const header of route.definition.requiredHeaders ?? []) {
+    const value = request.headers.get(header);
+    if (
+      value === null ||
+      value.length === 0 ||
+      value.length > 256 ||
+      !/^[\x21-\x7e]+$/u.test(value)
+    )
+      throw new InvalidInputError("invalid_request");
+  }
   const params = parseParameters(route, match);
   let body: unknown;
   if (route.definition.body !== undefined) {
@@ -241,7 +270,7 @@ async function dispatch(
     ...(route.definition.body === undefined ? {} : { body }),
     ...(authenticated === undefined ? {} : { authenticated }),
   });
-  const output = await handlers[route.definition.name](input, request);
+  const output = await handlers[route.definition.name](input, request, ctx);
 
   if (route.definition.response === undefined) {
     if (output !== undefined) throw new Error("No-content handler returned a response body");
@@ -249,32 +278,109 @@ async function dispatch(
   }
   const responseResult = route.definition.response.safeParse(output);
   if (!responseResult.success) throw new Error("Handler response violated its contract");
+  if (responseResult.data instanceof Response) return responseResult.data;
   return jsonResponse(responseResult.data, route.definition.successStatus);
 }
 
 export function createRouter(
   handlers: RouteHandlers,
   authentication: RouterAuthentication,
-): (request: Request) => Promise<Response> {
-  return async (request) => {
-    const url = new URL(request.url);
-    for (const route of compiledRoutes) {
-      if (request.method !== route.definition.method) continue;
+  policy: {
+    readonly rateLimiter: RateLimit;
+    readonly allowedOrigins: () => readonly string[];
+    readonly publicOrigin: () => string;
+  },
+): (request: Request, ctx: ExecutionContext) => Promise<Response> {
+  return async (request, ctx) => {
+    const requestId = crypto.randomUUID();
+    const started = performance.now();
+    let routeName: RouteName | "unmatched" = "unmatched";
+    let errorCode: string | null = null;
+    let allowedOrigin: string | undefined;
+    let response: Response;
+    try {
+      const url = new URL(request.url);
+      if (url.origin !== policy.publicOrigin()) throw new ContractError("resource_not_found");
+      const origin = request.headers.get("origin");
+      if (origin !== null && policy.allowedOrigins().includes(origin)) allowedOrigin = origin;
+      const method =
+        request.method === "OPTIONS"
+          ? request.headers.get("access-control-request-method")
+          : request.method;
+      const route = compiledRoutes.find(
+        (candidate) =>
+          candidate.definition.method === method && candidate.expression.test(url.pathname),
+      );
+      if (route === undefined) throw new ContractError("resource_not_found");
+      routeName = route.definition.name;
       const match = route.expression.exec(url.pathname);
-      if (match === null) continue;
-      try {
-        return await dispatch(route, match, request, handlers, authentication);
-      } catch (error) {
-        if (error instanceof AuthenticationRequiredError) {
-          return errorResponse("authentication_required");
-        }
-        if (error instanceof InvalidInputError) return errorResponse(error.code);
-        if (error instanceof ContractError) {
-          return errorResponse(error.code, error.retryAfterSeconds);
-        }
-        return errorResponse("internal_error");
+      if (match === null) throw new Error("Compiled route did not match");
+      if (request.method === "OPTIONS") {
+        parseParameters(route, match);
+        const headers = request.headers.get("access-control-request-headers");
+        if (
+          allowedOrigin === undefined ||
+          headers
+            ?.split(",")
+            .some(
+              (header) =>
+                !["authorization", "content-type", "if-match"].includes(
+                  header.trim().toLowerCase(),
+                ),
+            )
+        )
+          throw new ContractError("permission_denied");
+        response = noContentResponse();
+        response.headers.set("access-control-allow-methods", route.definition.method);
+        response.headers.set(
+          "access-control-allow-headers",
+          "Authorization, Content-Type, If-Match",
+        );
+      } else {
+        response = await dispatch(
+          route,
+          match,
+          request,
+          handlers,
+          authentication,
+          policy.rateLimiter,
+          ctx,
+        );
+      }
+    } catch (error) {
+      if (error instanceof AuthenticationRequiredError) {
+        errorCode = "authentication_required";
+        response = errorResponse("authentication_required");
+      } else if (error instanceof InvalidInputError || error instanceof ContractError) {
+        errorCode = error.code;
+        response = errorResponse(
+          error.code,
+          error instanceof ContractError ? error.retryAfterSeconds : undefined,
+        );
+      } else {
+        errorCode = "internal_error";
+        console.error({
+          error_class: error instanceof Error ? error.constructor.name : "NonError",
+          location: "http.router",
+        });
+        response = errorResponse("internal_error");
       }
     }
-    return errorResponse("resource_not_found");
+    response.headers.set("x-request-id", requestId);
+    response.headers.append("vary", "Origin");
+    if (allowedOrigin !== undefined) {
+      response.headers.set("access-control-allow-origin", allowedOrigin);
+      response.headers.set("access-control-expose-headers", "x-request-id, Retry-After");
+    }
+    console.log({
+      request_id: requestId,
+      route: routeName,
+      method: request.method,
+      status: response.status,
+      duration_ms: Math.round(performance.now() - started),
+      error_code: errorCode,
+      retry_after: response.headers.get("retry-after"),
+    });
+    return response;
   };
 }

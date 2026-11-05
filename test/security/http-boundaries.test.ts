@@ -1,6 +1,10 @@
+import { createExecutionContext } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { GoogleAccessTokens } from "../../src/connections/google-access-tokens";
+import { createHandlers } from "../../src/http/handlers";
+import { runtimeConfiguration } from "../../src/runtime/configuration";
 import type { Env } from "../../src/env";
 import type { FakeGoogleConfiguration, FakeGoogleStats } from "../support/fake-google";
 
@@ -81,10 +85,15 @@ async function authorize(started: Started): Promise<URL> {
 async function signIn(subject: string): Promise<{ credential: string; sessionId: string }> {
   await configure({ subject, email: "same-security@example.test" });
   const started = await start("/v1/sign-in/start");
-  expect((await exports.default.fetch(new Request(await authorize(started)))).status).toBe(200);
+  const callbackResponse = await exports.default.fetch(new Request(await authorize(started)));
+  expect(callbackResponse.status).toBe(200);
+  const confirmationCode = /class="code"[^>]*>([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})</u.exec(
+    await callbackResponse.text(),
+  )?.[1];
   const response = await post(`/v1/sign-in/${started.transaction_id}/redeem`, {
     polling_secret: started.polling_secret,
     code_verifier: verifier,
+    confirmation_code: confirmationCode,
   });
   expect(response.status).toBe(200);
   const value = await response.json<{ session: { credential: string; session_id: string } }>();
@@ -131,14 +140,158 @@ describe("Worker HTTP security boundaries", () => {
       const response = await exports.default.fetch(new Request(url));
       expect(response.status).toBe(404);
     }
-    for (const url of [duplicate, unknown]) {
+    for (const url of [duplicate]) {
       const response = await exports.default.fetch(new Request(url));
       expect(response.status).toBe(400);
     }
     expect(await statistics()).toMatchObject({ tokenRequests: 0, uniqueCodeExchanges: 0 });
 
-    expect((await exports.default.fetch(new Request(callback))).status).toBe(200);
+    expect((await exports.default.fetch(new Request(unknown))).status).toBe(200);
     expect(await statistics()).toMatchObject({ tokenRequests: 1, uniqueCodeExchanges: 1 });
+  });
+
+  it("requires the browser-only confirmation and terminally rejects one wrong guess", async () => {
+    const started = await start("/v1/sign-in/start");
+    const location = await authorize(started);
+    location.searchParams.set("hd", "example.test");
+    location.searchParams.append("hd", "ignored.example.test");
+    const callbackResponse = await exports.default.fetch(new Request(location));
+    expect(callbackResponse.status).toBe(200);
+    expect(callbackResponse.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(callbackResponse.headers.get("cache-control")).toBe("no-store");
+    const html = await callbackResponse.text();
+    const code = /class="code"[^>]*>([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})</u.exec(html)?.[1];
+    expect(code).toBeDefined();
+    const nonce = /<style nonce="([^"]+)"/u.exec(html)?.[1];
+    expect(callbackResponse.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(callbackResponse.headers.get("content-security-policy")).toContain(
+      `style-src 'nonce-${nonce}'`,
+    );
+    expect(html).not.toMatch(/<script|<link|https?:|v1\./u);
+    const stored = await bindings.DB.prepare(
+      "SELECT confirmation_code_hash FROM oauth_transactions WHERE id = ?",
+    )
+      .bind(started.transaction_id)
+      .first<{ confirmation_code_hash: string }>();
+    expect(stored?.confirmation_code_hash).toHaveLength(43);
+    expect(stored?.confirmation_code_hash).not.toBe(code);
+    const path = `/v1/sign-in/${started.transaction_id}/redeem`;
+    const proof = { polling_secret: started.polling_secret, code_verifier: verifier };
+    expect((await post(path, proof)).status).toBe(400);
+    const status = await post(`/v1/sign-in/${started.transaction_id}/status`, {
+      polling_secret: started.polling_secret,
+    });
+    expect(await status.text()).not.toContain(code);
+    const wrongCode = code === "22222222" ? "33333333" : "22222222";
+    expect((await post(path, { ...proof, confirmation_code: wrongCode })).status).toBe(409);
+    expect((await post(path, { ...proof, confirmation_code: code })).status).toBe(409);
+    expect(
+      await bindings.DB.prepare("SELECT COUNT(*) FROM device_sessions").first("COUNT(*)"),
+    ).toBe(0);
+    expect((await exports.default.fetch(new Request(location))).status).toBe(200);
+    expect(await (await exports.default.fetch(new Request(location))).text()).not.toContain(
+      'class="code"',
+    );
+  });
+
+  it("redeems confirmation once and never shows it on callback replay", async () => {
+    const started = await start("/v1/sign-in/start");
+    const location = await authorize(started);
+    const html = await (await exports.default.fetch(new Request(location))).text();
+    const code = /class="code"[^>]*>([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})</u.exec(html)?.[1];
+    expect(code).toBeDefined();
+    const path = `/v1/sign-in/${started.transaction_id}/redeem`;
+    const proof = {
+      polling_secret: started.polling_secret,
+      code_verifier: verifier,
+      confirmation_code: code,
+    };
+    expect((await post(path, proof)).status).toBe(200);
+    expect((await post(path, proof)).status).toBe(409);
+    expect(await (await exports.default.fetch(new Request(location))).text()).not.toContain(
+      'class="code"',
+    );
+  });
+
+  it("signs in a second device when Google returns already granted Calendar scopes", async () => {
+    const first = await signIn("second-device-subject");
+    await configure({ token: "granted_calendar_scopes" });
+    const second = await signIn("second-device-subject");
+    expect(second.sessionId).not.toBe(first.sessionId);
+    const firstSession = await (
+      await api("/v1/session", {}, first.credential)
+    ).json<{ principal_id: string }>();
+    const secondSession = await (
+      await api("/v1/session", {}, second.credential)
+    ).json<{ principal_id: string }>();
+    expect(firstSession.principal_id).toBe(secondSession.principal_id);
+    expect(await bindings.DB.prepare("SELECT COUNT(*) FROM connections").first("COUNT(*)")).toBe(0);
+    expect(
+      await bindings.DB.prepare("SELECT COUNT(*) FROM device_sessions").first("COUNT(*)"),
+    ).toBe(2);
+  });
+
+  it("disconnects even when a real refresh rotates tokens after its authority read", async () => {
+    const owner = await signIn("refresh-disconnect-owner");
+    const connection = await connect(owner.credential);
+    const runtime = await runtimeConfiguration(bindings);
+    const authenticated = await runtime.deviceSessions.authenticate(owner.credential);
+    if (authenticated === null) throw new Error("Missing fixture session");
+    const tokens = new GoogleAccessTokens({
+      db: bindings.DB,
+      environment: runtime.environment,
+      googleClientId: bindings.GOOGLE_CLIENT_ID,
+      googleClientSecret: bindings.GOOGLE_CLIENT_SECRET,
+      tokenKeyring: runtime.tokenKeyring,
+      googleProvider: runtime.googleProvider,
+      fetch: runtime.outboundFetch,
+      random: { bytes: (length) => crypto.getRandomValues(new Uint8Array(length)) },
+      sleep: () => Promise.resolve(),
+    });
+    const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
+      new Proxy(statement, {
+        get(target, property): unknown {
+          if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values));
+          if (property === "first")
+            return async () => {
+              const snapshot = await tokens.loadForPrincipal(authenticated.principalId);
+              if (snapshot === null) throw new Error("Missing fixture connection");
+              await tokens.access(snapshot, { forceRefresh: true });
+              return target.first();
+            };
+          const value: unknown = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    const db = new Proxy(bindings.DB, {
+      get(target, property): unknown {
+        if (property === "prepare")
+          return (sql: string) => {
+            const statement = target.prepare(sql);
+            return sql.startsWith("DELETE FROM connections WHERE id") ? wrap(statement) : statement;
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const handlers = createHandlers({ ...bindings, DB: db });
+    await expect(
+      handlers.disconnect(
+        {
+          params: { connection_id: connection.id },
+          query: {},
+          authenticated: {
+            principalId: authenticated.principalId,
+            sessionId: authenticated.session.id,
+            session: authenticated.session,
+          },
+        },
+        new Request("http://127.0.0.1:8787"),
+        createExecutionContext(),
+      ),
+    ).resolves.toBeUndefined();
+    expect(await bindings.DB.prepare("SELECT COUNT(*) FROM connections").first("COUNT(*)")).toBe(0);
+    expect(await statistics()).toMatchObject({ refreshRequests: 1 });
   });
 
   it("fences local disconnect despite corrupt token custody under concurrency", async () => {

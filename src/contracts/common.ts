@@ -5,8 +5,8 @@ import { decodeBase64Url } from "../crypto/base64url";
 import { isServiceCredential } from "../domain/service-credential";
 
 export const CLIENT_KINDS = DEVICE_CLIENT_KINDS;
-export const MAX_JSON_BODY_BYTES = 16 * 1024;
-export const MAX_CURSOR_LENGTH = 2048;
+export const MAX_JSON_BODY_BYTES = 128 * 1024;
+export const MAX_CURSOR_LENGTH = 4096;
 export const MAX_OPAQUE_SECRET_LENGTH = 1024;
 export const MAX_RANGE_DAYS = 93;
 
@@ -22,6 +22,20 @@ function canonicalBase64Url(bytes: number): (value: string) => boolean {
 }
 
 export const UuidSchema = z.uuid().refine((value) => value === value.toLowerCase());
+
+export function canonicalUuid(value: unknown): string | undefined {
+  return UuidSchema.safeParse(value).data;
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
 export const TransactionIdSchema = z.string().refine(canonicalBase64Url(32));
 export const DeviceSessionIdSchema = z.string().refine(canonicalBase64Url(16));
 export const PollingSecretSchema = z.string().refine(canonicalBase64Url(32));
@@ -49,6 +63,7 @@ export const ErrorCodeSchema = z.enum([
   "permission_denied",
   "resource_not_found",
   "conflict",
+  "sync_reset_required",
   "rate_limited",
   "dependency_unavailable",
   "internal_error",

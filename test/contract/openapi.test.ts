@@ -10,10 +10,6 @@ import {
   routes,
 } from "../../src/contracts";
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 describe("OpenAPI and runtime contract", () => {
   it("declares every runtime route once with the same method, path, and operation name", () => {
     const operationIds = [...spec.matchAll(/^\s+operationId: ([A-Za-z]+)$/gm)].map(
@@ -22,13 +18,27 @@ describe("OpenAPI and runtime contract", () => {
     expect(operationIds.sort()).toEqual([...ROUTE_NAMES].sort());
 
     for (const route of routes) {
+      const pathBlock = spec.split(`  ${route.path}:\n`)[1]?.split(/^ {2}\//m)[0];
       const routeBlock = new RegExp(
-        `^  ${escapeRegex(route.path)}:\\n    ${route.method.toLowerCase()}:\\n(?:.|\\n)*?^      operationId: ${route.name}$`,
+        `^    ${route.method.toLowerCase()}:\n(?:.|\n)*?^      operationId: ${route.name}$`,
         "m",
       );
-      expect(spec, `${route.method} ${route.path}`).toMatch(routeBlock);
+      expect(pathBlock, `${route.method} ${route.path}`).toMatch(routeBlock);
       expect(spec.match(new RegExp(`operationId: ${route.name}\\b`, "g"))).toHaveLength(1);
     }
+  });
+
+  it("documents HTML callback completion and sign-in-only confirmation", () => {
+    expect(spec).toContain("text/html:");
+    expect(spec).toContain("Unknown callback");
+    expect(spec).toContain("required: [polling_secret, code_verifier, confirmation_code]");
+    expect(spec).toContain("#/components/requestBodies/SignInRedeem");
+    expect(spec).toContain("#/components/requestBodies/TransactionRedeem");
+    expect(spec).toContain("Content-Security-Policy:");
+    expect(spec.split("  schemas:\n")[1]).toContain("    SignInRedeemRequest:\n");
+    expect(spec.split("  requestBodies:\n")[1]?.split("  schemas:\n")[0]).not.toContain(
+      "    SignInRedeemRequest:\n",
+    );
   });
 
   it("keeps security and limit constants visible in the public document", () => {
@@ -54,15 +64,16 @@ describe("OpenAPI and runtime contract", () => {
     expect(spec).toContain("Opaque deterministic series identifier.");
     expect(spec).toContain("all-day end date is preserved exactly from Google");
     expect(spec).toContain("is exclusive");
-    expect(spec).toContain("present interval increases strictly");
+    expect(spec).toContain("present interval does not decrease");
   });
 
-  it("documents strict objects, UUID locators, one-calendar reads, and no write surface", () => {
+  it("documents strict objects, UUID locators, one-calendar reads, and conditional writes", () => {
     expect(spec).toContain("additionalProperties: false");
     expect(spec).toContain("format: uuid");
     expect(spec).toContain("maxItems: 1");
     expect(spec).toContain("one calendar and one provider page");
-    expect(spec).not.toMatch(/^\s+(put|patch):$/m);
+    expect(spec).toMatch(/^\s+patch:$/m);
+    expect(spec).toContain("name: If-Match");
     expect(spec).not.toContain("Microsoft");
   });
 });

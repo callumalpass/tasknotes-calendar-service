@@ -71,9 +71,9 @@ async function calendarResource(
 ): Promise<void> {
   await testEnv.DB.prepare(
     `INSERT INTO calendars
-       (id, principal_id, connection_id, provider_calendar_id, name, description, color,
+       (id, principal_id, connection_id, provider_calendar_id, name, description,
         time_zone, access_role, is_primary, discovered_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'Description', '#ffffff', 'Europe/London', 'owner', 1, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, 'Description', 'Europe/London', 'owner', 1, ?, ?)`,
   )
     .bind(id, principalId, connectionId, providerId, name, NOW, NOW)
     .run();
@@ -255,7 +255,7 @@ describe("initial D1 schema invariants", () => {
     expect(await epoch()).toBe(3);
   });
 
-  it("enforces complete, 120-second, non-stealable refresh leases", async () => {
+  it("enforces complete 120-second refresh leases and only steals after expiry", async () => {
     await principal();
     await identity();
     await connection();
@@ -290,13 +290,11 @@ describe("initial D1 schema invariants", () => {
       .run();
     expect(nonOwner.meta.changes).toBe(0);
 
-    await expect(acquireRefreshLease("worker-b", NOW + 31, NOW + 61)).rejects.toThrow(
-      "invalid connection authority transition",
-    );
+    await acquireRefreshLease("worker-b", NOW + 31, NOW + 61);
     await testEnv.DB.prepare(
       `UPDATE connections SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
        refresh_lease_generation = NULL, refresh_lease_token_version = NULL, updated_at = ?
-       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-a'
+       WHERE id = 'connection-a' AND refresh_lease_owner = 'worker-b'
        AND refresh_lease_generation = generation AND refresh_lease_token_version = token_version`,
     )
       .bind(NOW + 32)
@@ -328,12 +326,12 @@ describe("initial D1 schema invariants", () => {
     }
   });
 
-  it("makes refresh leases non-stealable and permits only the exact owner to commit after expiry", async () => {
+  it("rejects stealing a live refresh lease and permits its owner to commit after expiry", async () => {
     await principal();
     await identity();
     await connection();
     await acquireRefreshLease("worker-a", NOW + 1, NOW + 121);
-    await expect(acquireRefreshLease("worker-b", NOW + 121, NOW + 241)).rejects.toThrow(
+    await expect(acquireRefreshLease("worker-b", NOW + 120, NOW + 240)).rejects.toThrow(
       "invalid connection authority transition",
     );
 
@@ -617,6 +615,36 @@ describe("initial D1 schema invariants", () => {
     ).rejects.toThrow("oauth transaction binding is immutable");
   });
 
+  it("binds confirmation digests only during sign-in authorization and never changes them", async () => {
+    await principal();
+    await identity();
+    await pendingSignIn("confirmation");
+    await expect(
+      testEnv.DB.prepare(
+        "UPDATE oauth_transactions SET confirmation_code_hash = ? WHERE id = 'confirmation'",
+      )
+        .bind("C".repeat(43))
+        .run(),
+    ).rejects.toThrow("oauth confirmation binding is immutable");
+    await startExchange("confirmation");
+    await testEnv.DB.prepare(
+      `UPDATE oauth_transactions SET status = 'authorized',
+         authorized_principal_id = 'principal-a', authorized_identity_id = 'identity-a',
+         callback_completed_at = ?, confirmation_code_hash = ? WHERE id = 'confirmation'`,
+    )
+      .bind(NOW + 40, "C".repeat(43))
+      .run();
+    for (const hash of ["D".repeat(43), null]) {
+      await expect(
+        testEnv.DB.prepare(
+          "UPDATE oauth_transactions SET confirmation_code_hash = ? WHERE id = 'confirmation'",
+        )
+          .bind(hash)
+          .run(),
+      ).rejects.toThrow("oauth confirmation binding is immutable");
+    }
+  });
+
   it("accepts every legal OAuth edge and rejects terminal exits", async () => {
     await principal();
     await identity();
@@ -766,7 +794,6 @@ describe("initial D1 schema invariants", () => {
       ["name", ""],
       ["name", "😀".repeat(501)],
       ["description", "😀".repeat(4001)],
-      ["color", "x".repeat(33)],
       ["time_zone", ""],
       ["time_zone", "x".repeat(101)],
       ["access_role", "administrator"],

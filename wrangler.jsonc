@@ -5,8 +5,17 @@
   "compatibility_date": "2026-08-22",
   "workers_dev": true,
   "observability": {
-    "enabled": false,
+    "enabled": true,
+    "logs": { "invocation_logs": false },
   },
+  "triggers": { "crons": ["0 * * * *"] },
+  "ratelimits": [
+    {
+      "name": "API_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 120, "period": 60 },
+    },
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -17,6 +26,7 @@
   ],
   "vars": {
     "ENVIRONMENT": "local",
+    "ALLOWED_ORIGINS": "",
     "PUBLIC_ORIGIN": "http://127.0.0.1:8787",
     "GOOGLE_CLIENT_ID": "local-fake-google-client",
     "GOOGLE_AUTHORIZATION_ENDPOINT": "http://127.0.0.1:9797/authorize",
@@ -32,8 +42,17 @@
       "workers_dev": false,
       "preview_urls": false,
       "observability": {
-        "enabled": false,
+        "enabled": true,
+        "logs": { "invocation_logs": false },
       },
+      "triggers": { "crons": ["0 * * * *"] },
+      "ratelimits": [
+        {
+          "name": "API_RATE_LIMITER",
+          "namespace_id": "1002",
+          "simple": { "limit": 120, "period": 60 },
+        },
+      ],
       "d1_databases": [
         {
           "binding": "DB",
@@ -44,6 +63,7 @@
       ],
       "vars": {
         "ENVIRONMENT": "lab",
+        "ALLOWED_ORIGINS": "",
         "PUBLIC_ORIGIN": "https://tasknotes-calendar-lab.callumalpass.workers.dev",
         "GOOGLE_CLIENT_ID": "1053661144223-a06h6u8uijtpnncoupo208qalse18a04.apps.googleusercontent.com",
         "GOOGLE_AUTHORIZATION_ENDPOINT": "https://accounts.google.com/o/oauth2/v2/auth",

@@ -1,3 +1,4 @@
+import { CALENDAR_SCOPES, normalizeGoogleScopes } from "./google-scopes";
 import type { CreatedDeviceSession, DeviceSessions } from "./device-sessions";
 import type { IdentityDeletion } from "./identity-deletion";
 import {
@@ -32,9 +33,9 @@ import type {
   TransactionStartResponse,
   TransactionStatusResponse,
 } from "../contracts/transactions";
-import { TransactionIdSchema, UuidSchema } from "../contracts/common";
+import { canonicalUuid, TransactionIdSchema, UuidSchema } from "../contracts/common";
 import { decodeBase64Url, encodeBase64Url } from "../crypto/base64url";
-import { sha256 } from "../crypto/digest";
+import { constantTimeEqual, sha256 } from "../crypto/digest";
 import { createPkceS256Challenge, isValidPkceVerifier } from "../crypto/pkce";
 import { randomBytes } from "../crypto/random";
 import type { RandomByteSource } from "../crypto/random";
@@ -45,7 +46,6 @@ import type { TokenEnvelopeRow } from "../storage/token-envelope-row";
 
 const TRANSACTION_LIFETIME_SECONDS = 600;
 const EXCHANGE_DEADLINE_SECONDS = 30;
-const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const CANONICAL_ISSUER = "https://accounts.google.com";
 const textEncoder = new TextEncoder();
 
@@ -85,7 +85,8 @@ export interface OAuthTransactionsDependencies {
 }
 
 export interface OAuthCallbackResult {
-  readonly status: "complete";
+  readonly status: "complete" | "failed";
+  readonly confirmationCode?: string;
 }
 
 interface PendingRow extends OAuthTransactionProviderPkceRow {
@@ -141,12 +142,6 @@ async function databaseNow(db: D1Database): Promise<number> {
   const value = await db.prepare("SELECT unixepoch() AS database_now").first("database_now");
   if (!Number.isSafeInteger(value) || (value as number) < 0) return fail("internal");
   return value as number;
-}
-
-function canonicalUuid(value: unknown): string {
-  const parsed = UuidSchema.safeParse(value);
-  if (!parsed.success) return fail("internal");
-  return parsed.data;
 }
 
 function validatePrincipal(value: unknown): string {
@@ -241,22 +236,12 @@ function validCalendarResult(
   ) {
     return false;
   }
-  const aliases = new Map([
-    ["openid", "openid"],
-    ["email", "email"],
-    ["https://www.googleapis.com/auth/userinfo.email", "email"],
-    ["profile", "profile"],
-    ["https://www.googleapis.com/auth/userinfo.profile", "profile"],
-    [CALENDAR_SCOPE, CALENDAR_SCOPE],
-  ]);
-  const effective = new Set<string>();
-  for (const scope of material["scopes"]) {
-    if (typeof scope !== "string" || textEncoder.encode(scope).length > 256) return false;
-    const canonical = aliases.get(scope);
-    if (canonical === undefined) return false;
-    effective.add(canonical);
+  try {
+    normalizeGoogleScopes(material["scopes"]);
+    return true;
+  } catch {
+    return false;
   }
-  return ["openid", "email", "profile", CALENDAR_SCOPE].every((scope) => effective.has(scope));
 }
 
 function envelopeBindings(row: OAuthTransactionProviderPkceRow): unknown[] {
@@ -317,7 +302,9 @@ export class OAuthTransactions {
     const nonce = secret(this.#dependencies.random);
     const providerVerifier = secret(this.#dependencies.random);
     const targetConnectionCandidate =
-      intent === "connect_calendar" ? canonicalUuid(this.#dependencies.uuid()) : null;
+      intent === "connect_calendar"
+        ? (canonicalUuid(this.#dependencies.uuid()) ?? fail("internal"))
+        : null;
     const [stateHash, pollingHash, nonceHash, providerChallenge] = await Promise.all([
       digest(state),
       digest(pollingSecret),
@@ -336,7 +323,7 @@ export class OAuthTransactions {
           : createGoogleCalendarAuthorizationUrl(
               this.#dependencies.google.endpoints,
               this.#dependencies.google.client,
-              { state, nonce, codeChallenge: providerChallenge, calendarScopes: [CALENDAR_SCOPE] },
+              { state, nonce, codeChallenge: providerChallenge, calendarScopes: CALENDAR_SCOPES },
             );
     } catch {
       return fail("internal");
@@ -377,7 +364,17 @@ export class OAuthTransactions {
           )
           .run();
       } else {
-        result = await this.#dependencies.db
+        const expire = this.#dependencies.db
+          .prepare(
+            `UPDATE oauth_transactions SET status = 'expired',
+             provider_pkce_schema_version = NULL, provider_pkce_key_version = NULL,
+             provider_pkce_dek_iv = NULL, provider_pkce_wrapped_dek = NULL,
+             provider_pkce_payload_iv = NULL, provider_pkce_ciphertext = NULL
+           WHERE authenticated_principal_id = ? AND intent = 'connect_calendar'
+             AND (status = 'pending' OR (status = 'exchanging' AND exchange_deadline_at <= ?))`,
+          )
+          .bind(principalId, createdAt);
+        const insert = this.#dependencies.db
           .prepare(
             `INSERT INTO oauth_transactions (
                id, intent, status, state_hash, nonce_hash, polling_secret_hash,
@@ -418,8 +415,11 @@ export class OAuthTransactions {
             createdAt,
             expiresAt,
             principalId,
-          )
-          .run();
+          );
+        const results = await this.#dependencies.db.batch([expire, insert]);
+        const inserted = results[1];
+        if (inserted === undefined) return fail("internal");
+        result = inserted;
       }
       if (result.meta.changes !== 1) return fail("not_found");
     } catch (error) {
@@ -430,9 +430,9 @@ export class OAuthTransactions {
             .prepare(
               `SELECT 1 FROM oauth_transactions
                WHERE authenticated_principal_id = ? AND intent = 'connect_calendar'
-                 AND status IN ('pending', 'exchanging') LIMIT 1`,
+                 AND status = 'exchanging' AND exchange_deadline_at > ? LIMIT 1`,
             )
-            .bind(principalId)
+            .bind(principalId, createdAt)
             .first();
           if (active !== null) return fail("conflict");
         } catch (diagnosticError) {
@@ -539,7 +539,7 @@ export class OAuthTransactions {
     try {
       return await this.#callbackUnsafe(query);
     } catch {
-      return { status: "complete" };
+      return { status: "failed" };
     }
   }
 
@@ -548,7 +548,7 @@ export class OAuthTransactions {
     if (!parsed.success) return fail("invalid_request");
     const stateHash = await digest(parsed.data.state);
     const timestamp = now(this.#dependencies);
-    if ("error" in parsed.data) {
+    if (parsed.data.error !== undefined) {
       try {
         await this.#dependencies.db
           .prepare(
@@ -573,7 +573,7 @@ export class OAuthTransactions {
       } catch {
         // The callback surface is deliberately quiet even for corrupt or concurrently removed rows.
       }
-      return { status: "complete" };
+      return { status: "failed" };
     }
 
     let pending: PendingRow | null;
@@ -589,12 +589,12 @@ export class OAuthTransactions {
         .bind(stateHash)
         .first<PendingRow>();
     } catch {
-      return { status: "complete" };
+      return { status: "failed" };
     }
-    if (pending === null) return { status: "complete" };
+    if (pending === null) return { status: "failed" };
     if (timestamp >= pending.expires_at) {
       await this.#expirePending(stateHash, timestamp);
-      return { status: "complete" };
+      return { status: "failed" };
     }
 
     let verifier: string;
@@ -610,7 +610,7 @@ export class OAuthTransactions {
       );
     } catch {
       await this.#failPending(stateHash, timestamp);
-      return { status: "complete" };
+      return { status: "failed" };
     }
 
     const deadline = Math.min(timestamp + EXCHANGE_DEADLINE_SECONDS, pending.expires_at);
@@ -636,9 +636,9 @@ export class OAuthTransactions {
         .bind(timestamp, deadline, stateHash, pending.id, timestamp)
         .first<ClaimedRow>();
     } catch {
-      return { status: "complete" };
+      return { status: "failed" };
     }
-    if (claimed === null) return { status: "complete" };
+    if (claimed === null) return { status: "failed" };
 
     try {
       if (claimed.intent === "sign_in") {
@@ -648,7 +648,16 @@ export class OAuthTransactions {
           expectedNonceHash: claimed.nonce_hash,
         });
         if (!validIdentity(identity)) throw new GoogleOidcError("invalid_id_token");
-        await this.#finalizeSignIn(claimed, identity);
+        const confirmationCode = Array.from(
+          randomBytes(this.#dependencies.random, 8),
+          (value) => "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"[value & 31],
+        ).join("");
+        const authorized = await this.#finalizeSignIn(
+          claimed,
+          identity,
+          await digest(confirmationCode),
+        );
+        return authorized ? { status: "complete", confirmationCode } : { status: "failed" };
       } else {
         if (claimed.expected_subject === null) throw new GoogleOidcError("identity_mismatch");
         const result = await this.#dependencies.google.exchangeCalendar({
@@ -656,7 +665,7 @@ export class OAuthTransactions {
           codeVerifier: verifier,
           expectedNonceHash: claimed.nonce_hash,
           expectedSubject: claimed.expected_subject,
-          requiredCalendarScopes: [CALENDAR_SCOPE],
+          requiredCalendarScopes: CALENDAR_SCOPES,
         });
         if (!validCalendarResult(result, claimed.expected_subject)) {
           const identity = (result as { identity?: { subject?: unknown } }).identity;
@@ -667,6 +676,11 @@ export class OAuthTransactions {
           );
         }
         await this.#finalizeConnect(claimed, result);
+        const completed = await this.#dependencies.db
+          .prepare("SELECT 1 FROM oauth_transactions WHERE id = ? AND status = 'authorized'")
+          .bind(claimed.id)
+          .first();
+        return { status: completed === null ? "failed" : "complete" };
       }
     } catch (error) {
       await this.#failClaimed(
@@ -676,7 +690,7 @@ export class OAuthTransactions {
           : "authorization_failed",
       );
     }
-    return { status: "complete" };
+    return { status: "failed" };
   }
 
   async #expirePending(stateHash: string, timestamp: number): Promise<void> {
@@ -737,10 +751,14 @@ export class OAuthTransactions {
     }
   }
 
-  async #finalizeSignIn(transaction: ClaimedRow, identity: GoogleIdentity): Promise<void> {
+  async #finalizeSignIn(
+    transaction: ClaimedRow,
+    identity: GoogleIdentity,
+    confirmationHash: string,
+  ): Promise<boolean> {
     const completedAt = now(this.#dependencies);
-    const candidatePrincipalId = canonicalUuid(this.#dependencies.uuid());
-    const candidateIdentityId = canonicalUuid(this.#dependencies.uuid());
+    const candidatePrincipalId = canonicalUuid(this.#dependencies.uuid()) ?? fail("internal");
+    const candidateIdentityId = canonicalUuid(this.#dependencies.uuid()) ?? fail("internal");
     const fence = await this.#dependencies.identityDeletion.fenceDigest({
       provider: "google",
       issuer: CANONICAL_ISSUER,
@@ -750,7 +768,7 @@ export class OAuthTransactions {
     const name = identity.name ?? null;
     const verified = identity.emailVerified === true ? 1 : 0;
     try {
-      await this.#dependencies.db.batch([
+      const results = await this.#dependencies.db.batch([
         this.#dependencies.db
           .prepare(
             `INSERT INTO principals (id, created_at, last_active_at)
@@ -810,7 +828,8 @@ export class OAuthTransactions {
           .prepare(
             `UPDATE oauth_transactions
              SET status = 'authorized', authorized_principal_id = identity_record.principal_id,
-                 authorized_identity_id = identity_record.id, callback_completed_at = ?
+                 authorized_identity_id = identity_record.id, callback_completed_at = ?,
+                 confirmation_code_hash = ?
              FROM external_identities AS identity_record
              WHERE oauth_transactions.id = ? AND oauth_transactions.status = 'exchanging'
                AND oauth_transactions.intent = 'sign_in' AND oauth_transactions.expires_at > ?
@@ -821,6 +840,7 @@ export class OAuthTransactions {
           )
           .bind(
             completedAt,
+            confirmationHash,
             transaction.id,
             completedAt,
             CANONICAL_ISSUER,
@@ -843,8 +863,10 @@ export class OAuthTransactions {
           )
           .bind(candidatePrincipalId),
       ]);
+      return results[2]?.meta.changes === 1;
     } catch {
       await this.#failClaimed(transaction.id, "authorization_failed");
+      return false;
     }
   }
 
@@ -1180,18 +1202,43 @@ export class OAuthTransactions {
     transactionIdValue: string,
     pollingSecret: string,
     tasknotesVerifier: string,
+    confirmationCode: string,
   ): Promise<SignInRedeemResponse> {
     const transactionId = validateTransactionId(transactionIdValue);
     const { pollingHash, challenge } = await this.#redemptionBindings(
       pollingSecret,
       tasknotesVerifier,
     );
-    await this.#assertRedeemable(null, "sign_in", transactionId, pollingHash, challenge);
+    const storedHash = await this.#assertRedeemable(
+      null,
+      "sign_in",
+      transactionId,
+      pollingHash,
+      challenge,
+    );
+    const confirmationHash = await digest(confirmationCode);
+    if (
+      storedHash === null ||
+      !constantTimeEqual(textEncoder.encode(confirmationHash), textEncoder.encode(storedHash))
+    ) {
+      await this.#dependencies.db
+        .prepare(
+          `UPDATE oauth_transactions SET status = 'failed', failure_code = 'authorization_failed',
+           authorized_principal_id = NULL, authorized_identity_id = NULL,
+           authorized_connection_id = NULL
+         WHERE id = ? AND intent = 'sign_in' AND status = 'authorized'
+           AND polling_secret_hash = ? AND tasknotes_pkce_challenge = ?`,
+        )
+        .bind(transactionId, pollingHash, challenge)
+        .run();
+      return fail("conflict");
+    }
     try {
       const session = await this.#dependencies.deviceSessions.redeemSignInTransaction({
         transactionId,
         expectedPollingDigest: pollingHash,
         expectedTasknotesPkceChallenge: challenge,
+        expectedConfirmationDigest: confirmationHash,
       });
       if (session === null) return fail("conflict");
       return { session: this.#sessionCredential(session) };
@@ -1269,7 +1316,7 @@ export class OAuthTransactions {
     transactionId: string,
     pollingHash: string,
     challenge: string,
-  ): Promise<void> {
+  ): Promise<string | null> {
     const timestamp = now(this.#dependencies);
     const principalSql =
       intent === "sign_in"
@@ -1291,14 +1338,15 @@ export class OAuthTransactions {
         .run();
       const row = await this.#dependencies.db
         .prepare(
-          `SELECT status, expires_at FROM oauth_transactions WHERE id = ?
+          `SELECT status, expires_at, confirmation_code_hash FROM oauth_transactions WHERE id = ?
            AND polling_secret_hash = ? AND tasknotes_pkce_challenge = ?
            AND intent = '${intent}' AND ${principalSql} LIMIT 1`,
         )
         .bind(...values)
-        .first<CapabilityRow>();
+        .first<CapabilityRow & { confirmation_code_hash: string | null }>();
       if (row === null) return fail("not_found");
       if (row.status !== "authorized" || row.expires_at <= timestamp) return fail("conflict");
+      return row.confirmation_code_hash;
     } catch (error) {
       if (error instanceof OAuthTransactionError) throw error;
       return fail("internal");

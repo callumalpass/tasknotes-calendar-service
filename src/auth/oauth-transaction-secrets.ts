@@ -1,3 +1,5 @@
+import { hasExactKeys, isRecord } from "../contracts/common";
+import { aesDecrypt, aesEncrypt, importAesKey } from "../crypto/aes-gcm";
 import { decodeBase64Url, encodeBase64Url } from "../crypto/base64url";
 import { isValidPkceVerifier } from "../crypto/pkce";
 import { randomBytes, webCryptoRandom } from "../crypto/random";
@@ -42,19 +44,6 @@ export class OAuthTransactionSecretError extends Error {
     super("OAuth transaction secret is invalid or cannot be authenticated");
     this.name = "OAuthTransactionSecretError";
   }
-}
-
-function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(bytes).buffer;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
 function assertBoundedString(value: unknown, maximumBytes: number): asserts value is string {
@@ -141,54 +130,6 @@ function getKek(keyring: KeyEncryptionKeyring, version: number): Uint8Array {
   return key;
 }
 
-async function importAesKey(raw: Uint8Array): Promise<CryptoKey> {
-  if (raw.length !== AES_KEY_BYTES) throw new TypeError("AES-256 key has an invalid size");
-  return crypto.subtle.importKey("raw", asArrayBuffer(raw), { name: "AES-GCM" }, false, [
-    "encrypt",
-    "decrypt",
-  ]);
-}
-
-async function encryptAesGcm(
-  key: CryptoKey,
-  plaintext: Uint8Array,
-  iv: Uint8Array,
-  aad: Uint8Array,
-): Promise<Uint8Array> {
-  return new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: "AES-GCM",
-        iv: asArrayBuffer(iv),
-        additionalData: asArrayBuffer(aad),
-        tagLength: 128,
-      },
-      key,
-      asArrayBuffer(plaintext),
-    ),
-  );
-}
-
-async function decryptAesGcm(
-  key: CryptoKey,
-  ciphertext: Uint8Array,
-  iv: Uint8Array,
-  aad: Uint8Array,
-): Promise<Uint8Array> {
-  return new Uint8Array(
-    await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: asArrayBuffer(iv),
-        additionalData: asArrayBuffer(aad),
-        tagLength: 128,
-      },
-      key,
-      asArrayBuffer(ciphertext),
-    ),
-  );
-}
-
 function serializeVerifier(verifier: string): Uint8Array {
   if (!isValidPkceVerifier(verifier)) throw new TypeError("provider PKCE verifier is invalid");
   return textEncoder.encode(JSON.stringify({ verifier }));
@@ -261,13 +202,13 @@ export async function encryptOAuthTransactionProviderPkce(
     const dek = randomBytes(random, AES_KEY_BYTES);
     const dekIv = randomBytes(random, GCM_IV_BYTES);
     const payloadIv = randomBytes(random, GCM_IV_BYTES);
-    const wrappedDek = await encryptAesGcm(
+    const wrappedDek = await aesEncrypt(
       kek,
       dek,
       dekIv,
       associatedData(context, "dek", keyVersion),
     );
-    const ciphertext = await encryptAesGcm(
+    const ciphertext = await aesEncrypt(
       await importAesKey(dek),
       plaintext,
       payloadIv,
@@ -303,7 +244,7 @@ export async function decryptOAuthTransactionProviderPkce(
       minBytes: AES_KEY_BYTES + GCM_TAG_BYTES,
       maxBytes: AES_KEY_BYTES + GCM_TAG_BYTES,
     });
-    const dek = await decryptAesGcm(
+    const dek = await aesDecrypt(
       kek,
       wrappedDek,
       dekIv,
@@ -318,7 +259,7 @@ export async function decryptOAuthTransactionProviderPkce(
       minBytes: MIN_SERIALIZED_PAYLOAD_BYTES + GCM_TAG_BYTES,
       maxBytes: MAX_SERIALIZED_PAYLOAD_BYTES + GCM_TAG_BYTES,
     });
-    const plaintext = await decryptAesGcm(
+    const plaintext = await aesDecrypt(
       await importAesKey(dek),
       ciphertext,
       payloadIv,

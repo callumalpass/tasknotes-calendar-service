@@ -1,4 +1,4 @@
-function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+export function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return Uint8Array.from(bytes).buffer;
 }
 

@@ -102,9 +102,12 @@ interface Grant {
 async function authorize(calendar = false): Promise<Grant> {
   const state = "state-for-isolated-fake-google-test";
   const nonce = "nonce-for-isolated-fake-google-test";
-  const scopes = ["openid", "email", "profile", ...(calendar ? [FAKE_CALENDAR_SCOPE] : [])].join(
-    " ",
-  );
+  const scopes = [
+    "openid",
+    "email",
+    "profile",
+    ...(calendar ? FAKE_CALENDAR_SCOPE.split(" ") : []),
+  ].join(" ");
   const url = new URL(`${FAKE_GOOGLE_ORIGIN}/authorize`);
   url.search = new URLSearchParams({
     client_id: FAKE_GOOGLE_CLIENT_ID,
@@ -115,7 +118,7 @@ async function authorize(calendar = false): Promise<Grant> {
     nonce,
     code_challenge: await sha256(verifier),
     code_challenge_method: "S256",
-    ...(calendar ? { access_type: "offline", prompt: "consent" } : {}),
+    ...(calendar ? { access_type: "offline", prompt: "consent" } : { prompt: "select_account" }),
   }).toString();
   const response = await fake.fetch(new Request(url, { redirect: "manual" }));
   expect(response.status).toBe(302);
@@ -222,13 +225,13 @@ describe("isolated workerd fake Google", () => {
           codeVerifier: verifier,
           expectedNonceHash: await sha256(calendar.nonce),
           expectedSubject: "fake-google-subject-001",
-          requiredCalendarScopes: [FAKE_CALENDAR_SCOPE],
+          requiredCalendarScopes: FAKE_CALENDAR_SCOPE.split(" "),
         },
         { fetch: outboundFetch, keyResolver },
       ),
     ).resolves.toMatchObject({
       identity: { subject: "fake-google-subject-001" },
-      tokenMaterial: { scopes: ["openid", "email", "profile", FAKE_CALENDAR_SCOPE] },
+      tokenMaterial: { scopes: ["openid", "email", "profile", ...FAKE_CALENDAR_SCOPE.split(" ")] },
     });
   });
 
@@ -293,6 +296,7 @@ describe("isolated workerd fake Google", () => {
       nonce: redirected.nonce,
       code_challenge: await sha256(verifier),
       code_challenge_method: "S256",
+      prompt: "select_account",
     }).toString();
     await expect(outboundFetch(authUrl, { redirect: "error" })).rejects.toThrow(
       "outbound redirect rejected",
@@ -317,6 +321,7 @@ describe("isolated workerd fake Google", () => {
         nonce,
         code_challenge: await sha256(verifier),
         code_challenge_method: "S256",
+        prompt: "select_account",
       }).toString();
       const response = await fake.fetch(new Request(url, { redirect: "manual" }));
       const callback = new URL(response.headers.get("location") ?? "missing:");
@@ -647,7 +652,14 @@ describe("isolated workerd fake Google", () => {
     });
     expect(rejected.status).toBe(400);
     expect(await rejected.text()).not.toContain("provider-calendar-one");
-    expect((await fake.fetch(exact, { method: "POST" })).status).toBe(405);
+    expect(
+      (
+        await fake.fetch(exact, {
+          method: "POST",
+          headers: { authorization: "Bearer fake-access", accept: "application/json" },
+        })
+      ).status,
+    ).toBe(405);
 
     await configure({
       calendarPages: [
@@ -693,6 +705,7 @@ describe("isolated workerd fake Google", () => {
             {
               id: "timed-provider-id",
               status: "confirmed",
+              etag: '"1"',
               updated: "2026-03-01T10:00:00Z",
               summary: "Timed",
               start: { dateTime: "2026-03-02T10:00:00Z" },
@@ -701,6 +714,7 @@ describe("isolated workerd fake Google", () => {
             {
               id: "all-day-provider-id",
               status: "confirmed",
+              etag: '"1"',
               updated: "2026-03-01T10:00:00Z",
               start: { date: "2026-03-03" },
               end: { date: "2026-03-05" },
@@ -708,6 +722,7 @@ describe("isolated workerd fake Google", () => {
             {
               id: "instance-provider-id",
               status: "tentative",
+              etag: '"1"',
               updated: "2026-03-01T10:00:00Z",
               start: { dateTime: "2026-03-06T10:00:00Z" },
               end: { dateTime: "2026-03-06T11:00:00Z" },
@@ -754,7 +769,7 @@ describe("isolated workerd fake Google", () => {
       listGoogleEventsPage({ ...request, pageToken: first.value.nextPageToken }),
     ).resolves.toMatchObject({
       ok: true,
-      value: { items: [{ id: "deleted-provider-id", status: "cancelled" }] },
+      value: { items: [], omittedCount: 0 },
     });
     await configure({
       eventPages: [
@@ -764,6 +779,7 @@ describe("isolated workerd fake Google", () => {
             {
               id: "changed-provider-id",
               status: "confirmed",
+              etag: '"1"',
               updated: "2026-03-08T10:00:00Z",
               start: { dateTime: "2026-03-09T10:00:00Z" },
               end: { dateTime: "2026-03-09T11:00:00Z" },

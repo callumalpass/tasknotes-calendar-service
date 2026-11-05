@@ -4,6 +4,9 @@ export type ProviderErrorCode =
   | "unauthorized"
   | "permission_denied"
   | "not_found"
+  | "gone"
+  | "duplicate"
+  | "precondition"
   | "rate_limited"
   | "unavailable"
   | "timeout"
@@ -22,6 +25,8 @@ export type ProviderOutcome<T> =
 export interface ProviderPage<T> {
   readonly items: readonly T[];
   readonly nextPageToken?: string;
+  readonly nextSyncToken?: string;
+  readonly omittedCount?: number;
 }
 
 export interface ProviderCalendar {
@@ -54,7 +59,8 @@ export interface ProviderEventRecurrence {
 
 interface ProviderEventCommon {
   readonly id: string;
-  readonly updatedAt: string;
+  readonly updatedAt?: string;
+  readonly etag?: string;
   readonly title?: string;
   readonly description?: string;
   readonly location?: string;
@@ -63,6 +69,8 @@ interface ProviderEventCommon {
 }
 
 export interface ProviderScheduledEvent extends ProviderEventCommon {
+  readonly updatedAt: string;
+  readonly etag: string;
   readonly status: "confirmed" | "tentative";
   readonly start: ProviderEventBoundary;
   /** Google all-day end dates are preserved exactly and are exclusive. */
