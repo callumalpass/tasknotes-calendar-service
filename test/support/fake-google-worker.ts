@@ -704,9 +704,9 @@ async function calendar(request: Request, url: URL): Promise<Response> {
     }
     if (event === undefined) return reject(404);
     if (request.method === "GET") return json(event);
-    if (event["status"] === "cancelled") return json({ error: { code: 410 } }, 410);
     if (request.headers.get("If-Match") !== event["etag"])
       return json({ error: { code: 412 } }, 412);
+    if (event["status"] === "cancelled") return json({ error: { code: 410 } }, 410);
     if (request.method === "DELETE") {
       const id = event["id"];
       for (const page of pages)

@@ -22,10 +22,16 @@ provider, deleted the account, and verified that only the keyed deletion fence r
 contents or provider event identifiers were persisted. The LAB public and preview routes were then
 disabled.
 
-ADR 0005 replaced that scope with `calendar.events` and `calendar.calendarlist.readonly`. These are
-not yet live-tested. Before the next supervised run, add both scopes to the LAB consent screen. That
-run must also cover write, conflict, and change-feed paths, a second device reusing the grant,
-Workspace `hd` callbacks, and cross-zone recurring events.
+ADR 0005 replaced that scope with `calendar.events` (sensitive) and `calendar.calendarlist.readonly`
+(non-sensitive), and both are on the LAB consent screen. A supervised run on 2026-11-06 passed
+sign-in confirmation, connect over an old-scope grant, discovery and paged reads across 13 calendars
+with nothing omitted, the change feed, event create, replay, patch, delete, conflict, boundary-kind
+and cross-zone writes, recurring series edits, a second device reusing the grant, rate limiting,
+disconnect, and account deletion. It left no test events.
+
+Still unproven live: deleting one recurring instance with a current `etag`, Workspace `hd`
+callbacks, and one unexplained `sync_reset_required` (410) from a change read after a burst of
+edits, which did not recur when each edit was followed by a change read.
 
 Before general availability, confirm from current Google documentation and the production console:
 

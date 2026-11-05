@@ -512,12 +512,16 @@ export class LiveGoogleCalendar {
         return fail("conflict");
       if (result.ok && result.value?.status === "cancelled") return fail("conflict");
     }
-    if (
-      method === "DELETE" &&
-      !result.ok &&
-      (result.error.code === "gone" || result.error.code === "not_found")
-    )
-      return undefined;
+    if (method === "DELETE" && !result.ok) {
+      // Google answers a stale If-Match with 412 even when the event is already deleted.
+      const gone = result.error.code === "precondition" ? await request("GET") : result;
+      if (
+        gone.ok
+          ? gone.value?.status === "cancelled"
+          : gone.error.code === "gone" || gone.error.code === "not_found"
+      )
+        return undefined;
+    }
     if (!result.ok) return this.#eventProviderFailure(result.error);
     if (method === "DELETE") return undefined;
     if (result.value === undefined) return fail("unavailable");
