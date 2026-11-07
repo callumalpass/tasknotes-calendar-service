@@ -107,7 +107,7 @@ export function allowedOriginsFromEnvironment(env: Env): readonly string[] {
   if (env.ALLOWED_ORIGINS === "") return [];
   return env.ALLOWED_ORIGINS.split(",").map((entry) => {
     const origin = entry.trim();
-    if (origin === "app://obsidian.md" || origin === "capacitor://localhost") return origin;
+    if (origin === "app://obsidian.md" || origin === "capacitor://app.tasknotes.dev") return origin;
     const url = new URL(origin);
     return exactOrigin(origin, env.ENVIRONMENT !== "local" && url.hostname !== "localhost");
   });

@@ -46,6 +46,23 @@ The cookie is only sent when the web origin and service are same-site, so produc
 is cross-site to every web origin. LAB browser testing therefore goes through a same-origin
 development proxy that sets `Origin`; it needs no weaker cookie attributes.
 
+### Capacitor clients
+
+The TaskNotes mobile app is the web app in a Capacitor WebView, and it is an `ios` or `android`
+client, never `web`. Its origins are `capacitor://app.tasknotes.dev` on iOS and
+`https://app.tasknotes.dev` on Android. The iOS origin is never same-site with the service, so both
+platforms use one path: bearer on every request, with `credentials: "omit"`.
+
+The app holds the credential sealed with AES-GCM under a non-extractable WebCrypto key in IndexedDB,
+the same custody the mdbase SDK uses in this WebView. It never enters `localStorage`, a URL, or
+React state. Script injection can use the session while the app is open but cannot extract the key.
+The ciphertext and key share the app's sandbox, so this is not hardware-bound; Keychain or Keystore
+custody would need a native plugin and can replace it without any service change.
+
+Google refuses OAuth inside an embedded WebView, so native sign-in opens the system browser through
+`@capacitor/browser`. The confirmation code is unchanged: it is typed back into the app, never
+carried by a return URL.
+
 ### Revocation
 
 Revocation and deletion remain server-side and take effect on the next request. Signing out the
@@ -56,4 +73,4 @@ current session or deleting the account also clears the cookie. Revoking another
 - Sign-in survives reload and browser restart for the session's lifetime.
 - Script injection in the web app can use the session while the page is open, but cannot extract it.
 - Web `client_kind` sessions created before this ADR are rejected. Only LAB test sessions existed.
-- Native and Obsidian clients are unchanged.
+- Obsidian is unchanged. `ios` and `android` sessions gained their app-side custody above.

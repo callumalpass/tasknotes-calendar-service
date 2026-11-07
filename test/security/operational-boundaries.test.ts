@@ -193,7 +193,7 @@ describe("router operational boundaries in workerd", () => {
   it.each([
     "https://web.tasknotes.test",
     "app://obsidian.md",
-    "capacitor://localhost",
+    "capacitor://app.tasknotes.dev",
     "http://localhost",
   ])("allows exact preflight and response origin %s", async (origin) => {
     const configured = { ...bindings, ALLOWED_ORIGINS: origin };
@@ -279,6 +279,7 @@ describe("router operational boundaries in workerd", () => {
       "https://one.test#secret",
       "https://one.test,",
       "app://attacker.test",
+      "capacitor://localhost",
     ]) {
       expect(() =>
         allowedOriginsFromEnvironment({ ...bindings, ALLOWED_ORIGINS: origin }),

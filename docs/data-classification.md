@@ -28,9 +28,9 @@ for inactivity.
 `ALLOWED_ORIGINS` is an exact, comma-separated browser origin allow-list, empty by default in local
 and LAB. Set the real web-client origins explicitly before browser integration. Native Obsidian
 `requestUrl` bypasses browser CORS and needs no origin entry. WebView `fetch` does require its exact
-origin (for example `app://obsidian.md`, `capacitor://localhost`, or `http://localhost`) if used;
-Capacitor's native HTTP transport avoids that requirement; patching ordinary `fetch` to use it is
-disabled by default. Current Capacitor Android defaults to `https://localhost`, so configure the
+origin (for example `app://obsidian.md`, `capacitor://app.tasknotes.dev`, or `http://localhost`) if
+used; Capacitor's native HTTP transport avoids that requirement; patching ordinary `fetch` to use it
+is disabled by default. Current Capacitor Android defaults to `https://localhost`, so configure the
 actual client origin rather than assuming `http://localhost`. These origins are supported as
 explicit configuration, not implicitly trusted defaults. Listed origins may use credentialed CORS,
 which only the web session cookie of ADR 0006 needs; that cookie also requires a listed `Origin` on
