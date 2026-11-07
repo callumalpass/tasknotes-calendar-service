@@ -33,6 +33,13 @@ Still unproven live: deleting one recurring instance with a current `etag`, Work
 callbacks, and one unexplained `sync_reset_required` (410) from a change read after a burst of
 edits, which did not recur when each edit was followed by a change read.
 
+The production project `tasknotes-calendar-prod` holds the client for
+`https://calendar.tasknotes.dev/oauth/google/callback`, with the same scopes on its consent screen
+and the app still in Testing. The console confirms `calendar.events` as sensitive and
+`calendar.calendarlist.readonly` as non-sensitive. The staging client for
+`https://calendar-staging.tasknotes.dev/oauth/google/callback` is a second client in the LAB
+project.
+
 Before general availability, confirm from current Google documentation and the production console:
 
 1. That `calendar.events` and `calendar.calendarlist.readonly` cover every shipped endpoint.

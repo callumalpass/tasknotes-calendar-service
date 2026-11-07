@@ -15,8 +15,9 @@
 | Request/audit metadata           | Operational         |          Workers Logs: 3 days Free / 7 days Paid | Request UUID, route name, method, status, duration, error code, Retry-After; internal errors log class and stable location only. No paths, principal/IP/provider IDs or payloads; automatic invocation logs disabled |
 
 Retention values are implementation defaults, not permission to retain data in logs or backups.
-Cloudflare Workers Logs retention is plan-dependent (3 days Free / 7 days Paid as of 2026-11-06).
-The account plan and backup/platform-retention behavior must be confirmed before real-user testing.
+Cloudflare Workers Logs retention is plan-dependent (3 days Free / 7 days Paid), and D1 Time Travel
+can restore deleted rows for 7 days on Free and 30 days on Paid (both checked 2026-11-07). The
+published privacy policy states the Paid figures, so it stays true on either plan.
 
 Cleanup uses D1's clock. Without a backlog, eligible rows are removed at the next hourly run;
 backlogs above 100 eligible rows per table take additional runs. There is no hard cleanup-delay
@@ -26,7 +27,7 @@ deletion, whose 10-minute lifetime is below the 1-hour fence threshold. Accounts
 for inactivity.
 
 `ALLOWED_ORIGINS` is an exact, comma-separated browser origin allow-list, empty by default in local
-and LAB. Set the real web-client origins explicitly before browser integration. Native Obsidian
+and LAB, and set per environment in `wrangler.jsonc` for staging and production. Native Obsidian
 `requestUrl` bypasses browser CORS and needs no origin entry. WebView `fetch` does require its exact
 origin (for example `app://obsidian.md`, `capacitor://app.tasknotes.dev`, or `http://localhost`) if
 used; Capacitor's native HTTP transport avoids that requirement; patching ordinary `fetch` to use it

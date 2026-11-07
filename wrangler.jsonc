@@ -74,5 +74,81 @@
         "GOOGLE_CALENDAR_API_ORIGIN": "https://www.googleapis.com",
       },
     },
+    "staging": {
+      "name": "tasknotes-calendar-staging",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "calendar-staging.tasknotes.dev", "custom_domain": true }],
+      "observability": {
+        "enabled": true,
+        "logs": { "invocation_logs": false },
+      },
+      "triggers": { "crons": ["0 * * * *"] },
+      "ratelimits": [
+        {
+          "name": "API_RATE_LIMITER",
+          "namespace_id": "1003",
+          "simple": { "limit": 120, "period": 60 },
+        },
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "tasknotes-calendar-staging",
+          "database_id": "ad65ad6f-926f-466f-9ba5-25256abb3c6c",
+          "migrations_dir": "migrations",
+        },
+      ],
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "ALLOWED_ORIGINS": "https://staging.tasknotes.dev",
+        "PUBLIC_ORIGIN": "https://calendar-staging.tasknotes.dev",
+        "GOOGLE_CLIENT_ID": "1053661144223-cb1mnpumt0ke45pb3v4pvpmulijuvnu0.apps.googleusercontent.com",
+        "GOOGLE_AUTHORIZATION_ENDPOINT": "https://accounts.google.com/o/oauth2/v2/auth",
+        "GOOGLE_TOKEN_ENDPOINT": "https://oauth2.googleapis.com/token",
+        "GOOGLE_JWKS_URI": "https://www.googleapis.com/oauth2/v3/certs",
+        "GOOGLE_ISSUER": "https://accounts.google.com",
+        "GOOGLE_REVOCATION_ENDPOINT": "https://oauth2.googleapis.com/revoke",
+        "GOOGLE_CALENDAR_API_ORIGIN": "https://www.googleapis.com",
+      },
+    },
+    "production": {
+      "name": "tasknotes-calendar-production",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "calendar.tasknotes.dev", "custom_domain": true }],
+      "observability": {
+        "enabled": true,
+        "logs": { "invocation_logs": false },
+      },
+      "triggers": { "crons": ["0 * * * *"] },
+      "ratelimits": [
+        {
+          "name": "API_RATE_LIMITER",
+          "namespace_id": "1004",
+          "simple": { "limit": 120, "period": 60 },
+        },
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "tasknotes-calendar-production",
+          "database_id": "b31a98a1-0209-4f25-bfee-9661331c2583",
+          "migrations_dir": "migrations",
+        },
+      ],
+      "vars": {
+        "ENVIRONMENT": "production",
+        "ALLOWED_ORIGINS": "https://app.tasknotes.dev,capacitor://app.tasknotes.dev",
+        "PUBLIC_ORIGIN": "https://calendar.tasknotes.dev",
+        "GOOGLE_CLIENT_ID": "354479931130-0l4alhcknnnjae319v4j63g5hjinrf3r.apps.googleusercontent.com",
+        "GOOGLE_AUTHORIZATION_ENDPOINT": "https://accounts.google.com/o/oauth2/v2/auth",
+        "GOOGLE_TOKEN_ENDPOINT": "https://oauth2.googleapis.com/token",
+        "GOOGLE_JWKS_URI": "https://www.googleapis.com/oauth2/v3/certs",
+        "GOOGLE_ISSUER": "https://accounts.google.com",
+        "GOOGLE_REVOCATION_ENDPOINT": "https://oauth2.googleapis.com/revoke",
+        "GOOGLE_CALENDAR_API_ORIGIN": "https://www.googleapis.com",
+      },
+    },
   },
 }
