@@ -7,8 +7,9 @@ per-device sessions, calendar discovery, bounded and incremental event reads, an
 write proxy. See [ADR 0005](docs/adr/0005-stateless-write-proxy.md).
 
 Reads, writes, incremental changes, and sign-in confirmation passed a supervised live LAB run on
-2026-11-06; see [Google readiness](docs/google-readiness.md) for remaining gaps. The service is not
-approved for production use.
+2026-11-06; see [Google readiness](docs/google-readiness.md) for remaining gaps. Staging and
+production Workers are deployed, but the production Google project is in Testing, so only listed
+test users can sign in, and no public app build enables the calendar.
 
 ## Local verification
 
@@ -65,7 +66,24 @@ pnpm deploy:lab:dry-run
 pnpm exec wrangler deploy --env lab
 ```
 
-These commands target LAB only. Production deployment is not configured.
+These commands target LAB only.
+
+## Staging and production
+
+`wrangler.jsonc` defines `staging` (`https://calendar-staging.tasknotes.dev`) and `production`
+(`https://calendar.tasknotes.dev`), each with its own D1 database, secrets, and Google client. The
+staging client lives in the `tasknotes-calendar-lab` Google project, and the production client in
+`tasknotes-calendar-prod`. Neither environment has a `workers.dev` or preview route.
+
+```bash
+pnpm migrations:staging
+pnpm exec wrangler deploy --env staging
+pnpm migrations:production
+pnpm exec wrangler deploy --env production
+```
+
+Deploy staging first. Passing it does not by itself approve a production deploy; the release gates
+in [ADR 0002](docs/adr/0002-testing-and-release-gates.md) still apply.
 
 See:
 
