@@ -5,6 +5,7 @@ import {
   mapProviderEvents,
   type ProviderEventMappingContext,
 } from "../../../src/events/map-provider-events";
+import { openEventId } from "../../../src/crypto/event-id";
 import type { ProviderEvent } from "../../../src/provider/types";
 
 const CALENDAR_ID = "550e8400-e29b-41d4-a716-446655440000";
@@ -22,6 +23,7 @@ function event(overrides: Partial<ProviderEvent> = {}): ProviderEvent {
     id: "provider-event\u0000|:id",
     status: "confirmed",
     updatedAt: "2026-08-30T12:00:00Z",
+    etag: '"1"',
     title: "Planning",
     transparency: "opaque",
     start: { kind: "timed", dateTime: "2026-09-01T10:00:00Z" },
@@ -40,10 +42,11 @@ async function mappedId(
 }
 
 describe("provider event public mapping", () => {
-  it("matches a fixed UUIDv8 vector and maps the canonical projection", async () => {
+  it("emits a deterministic sealed identifier and maps the canonical projection", async () => {
     const [mapped] = await mapProviderEvents([event()], context);
     expect(mapped).toEqual({
-      id: "93d45468-3efe-87dd-83a7-835dd49d6fa2",
+      id: await mappedId(),
+      etag: '"1"',
       calendar_id: CALENDAR_ID,
       status: "confirmed",
       title: "Planning",
@@ -56,11 +59,11 @@ describe("provider event public mapping", () => {
     });
   });
 
-  it("is stable under repetition and concurrent mapping with valid UUID version and variant", async () => {
+  it("is stable under repetition and concurrent mapping with reversible opaque IDs", async () => {
     const ids = await Promise.all(Array.from({ length: 40 }, async () => mappedId()));
     expect(new Set(ids)).toEqual(new Set([ids[0]]));
     for (const id of ids) {
-      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+      expect(id).toMatch(/^e1_[A-Za-z0-9_-]+$/u);
     }
   });
 
@@ -131,46 +134,20 @@ describe("provider event public mapping", () => {
     expect(JSON.stringify(mapped)).not.toContain(providerId);
   });
 
-  it.each([
-    { authorizationScopedCalendarId: "not-a-uuid" },
-    { environment: "test" },
-    { provider: "microsoft" },
-    { eventIdKey: new Uint8Array(31) },
-  ])(
-    "fails generically for malformed context without exposing supplied values",
-    async (invalid) => {
-      const supplied = { ...context, ...invalid } as unknown as ProviderEventMappingContext;
-      const rejection = mapProviderEvents([event()], supplied);
-      await expect(rejection).rejects.toBeInstanceOf(EventMappingError);
-      await rejection.catch((error: unknown) => {
-        expect(String(error)).toBe("EventMappingError: Provider event mapping failed");
-        expect(String(error)).not.toContain(String(Object.values(invalid)[0]));
-      });
-    },
-  );
-
-  it.each([
-    { updatedAt: "malformed" },
-    { id: "" },
-    { extra: "raw" },
-    { end: { kind: "timed", dateTime: "2026-09-01T10:00:00Z" } },
-    { end: { kind: "all_day", date: "2026-09-02" } },
-    {
-      start: {
-        kind: "timed",
-        dateTime: "2026-09-01T10:00:00Z",
-        timeZone: "America/New_York",
-      },
-    },
-    { title: "x".repeat(1001) },
-    {
-      recurrence: {
-        seriesId: "series",
-        originalStart: { kind: "all_day", date: "2026-09-01" },
-      },
-    },
-  ])("fails generically for malformed private domain values", async (invalid) => {
-    const raw = { ...event(), ...invalid } as unknown as ProviderEvent;
-    await expect(mapProviderEvents([raw], context)).rejects.toEqual(new EventMappingError());
+  it("opens only under the original calendar and key", async () => {
+    const id = await mappedId();
+    await expect(openEventId(id, context, KEY)).resolves.toBe(event().id);
+    await expect(
+      openEventId(id, { ...context, authorizationScopedCalendarId: OTHER_CALENDAR_ID }, KEY),
+    ).rejects.toThrow();
+    await expect(openEventId(id, context, new Uint8Array(32).fill(9))).rejects.toThrow();
+  });
+  it("fails generically for invalid key material or an oversized provider ID", async () => {
+    await expect(
+      mapProviderEvents([event()], { ...context, eventIdKey: new Uint8Array(31) }),
+    ).rejects.toEqual(new EventMappingError());
+    await expect(mapProviderEvents([event({ id: "x".repeat(1025) })], context)).rejects.toEqual(
+      new EventMappingError(),
+    );
   });
 });

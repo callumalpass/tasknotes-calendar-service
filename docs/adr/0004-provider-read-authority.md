@@ -1,6 +1,6 @@
 # ADR 0004: Provider-read authority and refresh uncertainty
 
-- Status: accepted
+- Status: Accepted, amended by ADR 0005 (refresh leases, provider writes)
 - Date: 2026-08-31
 
 ## Context

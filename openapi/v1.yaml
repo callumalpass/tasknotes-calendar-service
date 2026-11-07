@@ -3,7 +3,7 @@ info:
   title: TaskNotes Calendar API
   version: 1.0.0
   description:
-    Provider-neutral, read-only calendar connection contract. The first implementation supports
+    Provider-neutral, stateless calendar read and write contract. The first implementation supports
     Google only.
 servers:
   - url: https://calendar.tasknotes.example
@@ -34,7 +34,7 @@ paths:
     post:
       operationId: signInStart
       tags: [Sign-in]
-      x-max-body-bytes: 16384
+      x-max-body-bytes: 131072
       requestBody: { $ref: "#/components/requestBodies/TransactionStart" }
       responses:
         "201": { $ref: "#/components/responses/TransactionStart" }
@@ -46,7 +46,7 @@ paths:
     post:
       operationId: signInStatus
       tags: [Sign-in]
-      x-max-body-bytes: 16384
+      x-max-body-bytes: 131072
       parameters:
         - $ref: "#/components/parameters/TransactionId"
       requestBody: { $ref: "#/components/requestBodies/TransactionStatus" }
@@ -59,17 +59,20 @@ paths:
     post:
       operationId: signInRedeem
       tags: [Sign-in]
-      x-max-body-bytes: 16384
+      x-max-body-bytes: 131072
       parameters:
         - $ref: "#/components/parameters/TransactionId"
-      requestBody: { $ref: "#/components/requestBodies/TransactionRedeem" }
+      requestBody: { $ref: "#/components/requestBodies/SignInRedeem" }
       responses:
         "200":
-          description: A one-time device session credential.
+          description: >-
+            A device session. Web sessions receive it only as the Set-Cookie session cookie; other
+            clients receive a one-time credential in the body.
           headers:
             {
               Cache-Control: { $ref: "#/components/headers/NoStore" },
               X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+              Set-Cookie: { $ref: "#/components/headers/SessionCookie" },
             }
           content:
             { application/json: { schema: { $ref: "#/components/schemas/SignInRedeemResponse" } } }
@@ -83,8 +86,8 @@ paths:
     post:
       operationId: connectStart
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
-      x-max-body-bytes: 16384
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      x-max-body-bytes: 131072
       requestBody: { $ref: "#/components/requestBodies/TransactionStart" }
       responses:
         "201": { $ref: "#/components/responses/TransactionStart" }
@@ -98,8 +101,8 @@ paths:
     post:
       operationId: connectStatus
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
-      x-max-body-bytes: 16384
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      x-max-body-bytes: 131072
       parameters:
         - $ref: "#/components/parameters/TransactionId"
       requestBody: { $ref: "#/components/requestBodies/TransactionStatus" }
@@ -113,8 +116,8 @@ paths:
     post:
       operationId: connectRedeem
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
-      x-max-body-bytes: 16384
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      x-max-body-bytes: 131072
       parameters:
         - $ref: "#/components/parameters/TransactionId"
       requestBody: { $ref: "#/components/requestBodies/TransactionRedeem" }
@@ -139,7 +142,7 @@ paths:
     get:
       operationId: session
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Session" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -148,7 +151,7 @@ paths:
     get:
       operationId: connections
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Connections" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -157,7 +160,7 @@ paths:
     delete:
       operationId: disconnect
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/ConnectionId"
       responses:
@@ -169,7 +172,7 @@ paths:
     get:
       operationId: calendars
       tags: [Calendar]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Calendars" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -184,7 +187,7 @@ paths:
         Reads at most 250 events from one calendar and one provider page for a range no longer than
         93 days.
       tags: [Calendar]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/CalendarId"
         - {
@@ -203,7 +206,7 @@ paths:
             name: cursor,
             in: query,
             required: false,
-            schema: { type: string, minLength: 16, maxLength: 2048 },
+            schema: { type: string, minLength: 16, maxLength: 4096 },
           }
       responses:
         "200": { $ref: "#/components/responses/Events" }
@@ -214,11 +217,168 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/Unavailable" }
         "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      operationId: createEvent
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CalendarId"
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/CreateEvent" } } }
+      responses:
+        "201":
+          {
+            description: Success.,
+            content: { application/json: { schema: { $ref: "#/components/schemas/Event" } } },
+          }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "403":
+          {
+            description: permission_denied,
+            content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+          }
+  /v1/calendars/{calendar_id}/changes:
+    get:
+      operationId: changes
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CalendarId"
+        - {
+            name: cursor,
+            in: query,
+            required: false,
+            schema: { type: string, minLength: 16, maxLength: 4096 },
+          }
+      description:
+        Initial synchronization omits cursor and range filters. One provider page per request.
+        Subsequent requests use only the returned cursor; expired sync tokens require restarting.
+      responses:
+        "200":
+          {
+            description: Success.,
+            content: { application/json: { schema: { $ref: "#/components/schemas/ChangesPage" } } },
+          }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "410":
+          {
+            description: "sync_reset_required; restart without a cursor",
+            content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+          }
+  /v1/calendars/{calendar_id}/events/{event_id}:
+    get:
+      operationId: getEvent
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CalendarId"
+        - {
+            name: event_id,
+            in: path,
+            required: true,
+            schema: { $ref: "#/components/schemas/EventId" },
+          }
+      responses:
+        "200":
+          {
+            description: Success.,
+            content: { application/json: { schema: { $ref: "#/components/schemas/Event" } } },
+          }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      operationId: patchEvent
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CalendarId"
+        - {
+            name: event_id,
+            in: path,
+            required: true,
+            schema: { $ref: "#/components/schemas/EventId" },
+          }
+        - {
+            name: If-Match,
+            in: header,
+            required: true,
+            schema: { type: string, minLength: 1, maxLength: 256 },
+          }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WriteEvent" } } }
+      responses:
+        "200":
+          {
+            description: Success.,
+            content: { application/json: { schema: { $ref: "#/components/schemas/Event" } } },
+          }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "403":
+          {
+            description: permission_denied,
+            content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+          }
+    delete:
+      operationId: deleteEvent
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
+      parameters:
+        - $ref: "#/components/parameters/CalendarId"
+        - {
+            name: event_id,
+            in: path,
+            required: true,
+            schema: { $ref: "#/components/schemas/EventId" },
+          }
+        - {
+            name: If-Match,
+            in: header,
+            required: true,
+            schema: { type: string, minLength: 1, maxLength: 256 },
+          }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/AuthenticationRequired" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "403":
+          {
+            description: permission_denied,
+            content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } },
+          }
   /v1/devices:
     get:
       operationId: devices
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Devices" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -227,7 +387,7 @@ paths:
     delete:
       operationId: revokeDevice
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/DeviceId"
       responses:
@@ -239,7 +399,7 @@ paths:
     delete:
       operationId: deleteAccount
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "204": { $ref: "#/components/responses/NoContent" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -249,8 +409,9 @@ paths:
       operationId: providerCallback
       tags: [Connections]
       description:
-        OAuth provider redirect. Exactly one of code or error is required. Recognized bounded Google
-        callback metadata is discarded. Never returns a service credential or personal data.
+        OAuth provider redirect. Exactly one of code or error is required. Unknown callback
+        parameters are ignored. Returns a quiet HTML completion or failure page, never a credential.
+        Successful sign-in shows a one-time confirmation code for the initiating client.
       parameters:
         - {
             name: state,
@@ -270,53 +431,18 @@ paths:
             required: false,
             schema: { type: string, pattern: "^[A-Za-z0-9._~-]{1,128}$" },
           }
-        - { name: scope, in: query, required: false, schema: { type: string, maxLength: 2048 } }
-        - {
-            name: authuser,
-            in: query,
-            required: false,
-            schema: { type: string, pattern: "^\\d{1,10}$" },
-          }
-        - { name: prompt, in: query, required: false, schema: { type: string, maxLength: 128 } }
-        - {
-            name: iss,
-            in: query,
-            required: false,
-            schema: { type: string, enum: ["https://accounts.google.com", "accounts.google.com"] },
-          }
-        - {
-            name: error_description,
-            in: query,
-            required: false,
-            schema: { type: string, maxLength: 1024 },
-          }
-        - {
-            name: error_uri,
-            in: query,
-            required: false,
-            schema: { type: string, format: uri, maxLength: 2048 },
-          }
       responses:
         "200":
           description: Callback recorded; the initiating client must poll and redeem.
           headers:
-            {
-              Cache-Control: { $ref: "#/components/headers/NoStore" },
-              X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
-            }
+            Cache-Control: { schema: { type: string, const: no-store } }
+            Content-Security-Policy:
+              schema: { type: string }
+              description: default-src 'none'; inline styles require a per-response nonce.
+            X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" }
           content:
-            {
-              application/json:
-                {
-                  schema:
-                    {
-                      type: object,
-                      additionalProperties: false,
-                      required: [status],
-                      properties: { status: { const: complete } },
-                    },
-                },
-            }
+            text/html:
+              schema: { type: string }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "500": { $ref: "#/components/responses/InternalError" }
 components:
@@ -325,7 +451,15 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-tasknotes_session
+      description: Web sessions only. Every request must carry an allow-listed Origin.
   headers:
+    SessionCookie:
+      description: HttpOnly web session cookie, set when the redeemed session's client kind is web.
+      schema: { type: string }
     NoStore: { schema: { type: string, const: "private, no-store" } }
     NoSniff: { schema: { type: string, const: nosniff } }
     RetryAfter: { schema: { type: integer, minimum: 1, maximum: 300 } }
@@ -357,6 +491,10 @@ components:
       required: true
       content:
         { application/json: { schema: { $ref: "#/components/schemas/TransactionStartRequest" } } }
+    SignInRedeem:
+      required: true
+      content:
+        { application/json: { schema: { $ref: "#/components/schemas/SignInRedeemRequest" } } }
     TransactionRedeem:
       required: true
       content:
@@ -381,6 +519,7 @@ components:
                 permission_denied,
                 resource_not_found,
                 conflict,
+                sync_reset_required,
                 rate_limited,
                 dependency_unavailable,
                 internal_error,
@@ -406,7 +545,7 @@ components:
       required: [transaction_id, authorization_url, polling_secret, expires_at]
       properties:
         transaction_id: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
-        authorization_url: { type: string, format: uri, maxLength: 2048 }
+        authorization_url: { type: string, format: uri, maxLength: 4096 }
         polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
         expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     TransactionStatusRequest:
@@ -415,6 +554,19 @@ components:
       required: [polling_secret]
       properties:
         polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
+    SignInRedeemRequest:
+      type: object
+      additionalProperties: false
+      required: [polling_secret, code_verifier, confirmation_code]
+      properties:
+        polling_secret: { type: string, pattern: "^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
+        code_verifier: { type: string, pattern: "^[A-Za-z0-9._~-]{43,128}$" }
+        confirmation_code:
+          type: string
+          pattern: "^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$"
+          description:
+            One-time code shown only in the consent browser. One wrong attempt fails the
+            transaction.
     TransactionRedeemRequest:
       type: object
       additionalProperties: false
@@ -474,11 +626,23 @@ components:
         session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    WebSession:
+      type: object
+      additionalProperties: false
+      required: [session_id, idle_expires_at, absolute_expires_at]
+      properties:
+        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
+        idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     SignInRedeemResponse:
       type: object
       additionalProperties: false
       required: [session]
-      properties: { session: { $ref: "#/components/schemas/SessionCredential" } }
+      properties:
+        session:
+          oneOf:
+            - { $ref: "#/components/schemas/SessionCredential" }
+            - { $ref: "#/components/schemas/WebSession" }
     ConnectRedeemResponse:
       type: object
       additionalProperties: false
@@ -523,15 +687,64 @@ components:
     Calendar:
       type: object
       additionalProperties: false
-      required: [id, connection_id, name, description, color, time_zone, is_primary]
+      required: [id, connection_id, name, description, can_write, time_zone, is_primary]
       properties:
         id: { type: string, format: uuid }
         connection_id: { type: string, format: uuid }
         name: { type: string, minLength: 1, maxLength: 500 }
         description: { type: [string, "null"], maxLength: 4000 }
-        color: { type: [string, "null"], maxLength: 32 }
+        can_write: { type: boolean }
         time_zone: { type: [string, "null"], maxLength: 100 }
         is_primary: { type: boolean }
+    EventId:
+      type: string
+      pattern: "^e1_[A-Za-z0-9_-]{39,1403}$"
+      maxLength: 1406
+    WriteEvent:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, maxLength: 1000 }
+        description: { type: string, maxLength: 16000 }
+        location: { type: string, maxLength: 1000 }
+        start: { $ref: "#/components/schemas/EventBoundary" }
+        end: { $ref: "#/components/schemas/EventBoundary" }
+        transparency: { enum: [opaque, transparent] }
+        recurrence:
+          type: array
+          maxItems: 32
+          x-max-json-utf8-bytes: 16384
+          items:
+            {
+              type: string,
+              minLength: 1,
+              maxLength: 2048,
+              pattern: '^(?:RRULE|EXDATE|RDATE)(?:;[^:\r\n]+)?:[^\r\n]+$',
+            }
+    CreateEvent:
+      type: object
+      additionalProperties: false
+      required: [idempotency_key, start, end]
+      properties:
+        idempotency_key: { type: string, format: uuid }
+        title: { type: string, maxLength: 1000 }
+        description: { type: string, maxLength: 16000 }
+        location: { type: string, maxLength: 1000 }
+        start: { $ref: "#/components/schemas/EventBoundary" }
+        end: { $ref: "#/components/schemas/EventBoundary" }
+        transparency: { enum: [opaque, transparent] }
+        recurrence: { $ref: "#/components/schemas/WriteEvent/properties/recurrence" }
+    ChangesPage:
+      type: object
+      additionalProperties: false
+      required: [events, omitted_count, next_cursor, sync_cursor]
+      description: Exactly one cursor is non-null. Follow next_cursor until sync_cursor is returned.
+      properties:
+        events: { type: array, maxItems: 250, items: { $ref: "#/components/schemas/Event" } }
+        omitted_count: { type: integer, minimum: 0, maximum: 250 }
+        next_cursor: { type: [string, "null"], minLength: 16, maxLength: 4096 }
+        sync_cursor: { type: [string, "null"], minLength: 16, maxLength: 4096 }
     EventBoundary:
       description:
         A timed instant or an all-day date. An all-day end date is preserved exactly from Google and
@@ -560,12 +773,15 @@ components:
       required: [series_id, original_start]
       properties:
         series_id:
-          { type: string, format: uuid, description: Opaque deterministic series identifier. }
+          {
+            $ref: "#/components/schemas/EventId",
+            description: Opaque deterministic series identifier.,
+          }
         original_start: { $ref: "#/components/schemas/EventBoundary" }
     Event:
       description:
         Provider-neutral event with opaque deterministic identifiers. Boundary kinds match and every
-        present interval increases strictly.
+        present interval does not decrease; zero-duration events are valid.
       oneOf:
         - $ref: "#/components/schemas/ConfirmedEvent"
         - $ref: "#/components/schemas/TentativeEvent"
@@ -575,9 +791,26 @@ components:
       type: object
       additionalProperties: false
       required:
-        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+        [
+          id,
+          etag,
+          calendar_id,
+          status,
+          title,
+          description,
+          location,
+          start,
+          end,
+          updated_at,
+          recurrence,
+        ]
       properties:
-        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        id:
+          {
+            $ref: "#/components/schemas/EventId",
+            description: Opaque deterministic event identifier.,
+          }
+        etag: { type: string, minLength: 1, maxLength: 256 }
         calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
         status: { const: confirmed }
         title: { type: [string, "null"], maxLength: 1000 }
@@ -591,9 +824,26 @@ components:
       type: object
       additionalProperties: false
       required:
-        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+        [
+          id,
+          etag,
+          calendar_id,
+          status,
+          title,
+          description,
+          location,
+          start,
+          end,
+          updated_at,
+          recurrence,
+        ]
       properties:
-        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        id:
+          {
+            $ref: "#/components/schemas/EventId",
+            description: Opaque deterministic event identifier.,
+          }
+        etag: { type: string, minLength: 1, maxLength: 256 }
         calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
         status: { const: tentative }
         title: { type: [string, "null"], maxLength: 1000 }
@@ -612,9 +862,26 @@ components:
       type: object
       additionalProperties: false
       required:
-        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+        [
+          id,
+          etag,
+          calendar_id,
+          status,
+          title,
+          description,
+          location,
+          start,
+          end,
+          updated_at,
+          recurrence,
+        ]
       properties:
-        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        id:
+          {
+            $ref: "#/components/schemas/EventId",
+            description: Opaque deterministic event identifier.,
+          }
+        etag: { type: [string, "null"], minLength: 1, maxLength: 256 }
         calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
         status: { const: cancelled }
         title: { type: [string, "null"], maxLength: 1000 }
@@ -622,15 +889,32 @@ components:
         location: { type: [string, "null"], maxLength: 1000 }
         start: { $ref: "#/components/schemas/EventBoundary" }
         end: { $ref: "#/components/schemas/EventBoundary" }
-        updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        updated_at: { oneOf: [{ $ref: "#/components/schemas/Rfc3339Instant" }, { type: "null" }] }
         recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
     CancelledEventWithoutInterval:
       type: object
       additionalProperties: false
       required:
-        [id, calendar_id, status, title, description, location, start, end, updated_at, recurrence]
+        [
+          id,
+          etag,
+          calendar_id,
+          status,
+          title,
+          description,
+          location,
+          start,
+          end,
+          updated_at,
+          recurrence,
+        ]
       properties:
-        id: { type: string, format: uuid, description: Opaque deterministic event identifier. }
+        id:
+          {
+            $ref: "#/components/schemas/EventId",
+            description: Opaque deterministic event identifier.,
+          }
+        etag: { type: [string, "null"], minLength: 1, maxLength: 256 }
         calendar_id: { type: string, format: uuid, description: Server-resolved calendar locator. }
         status: { const: cancelled }
         title: { type: [string, "null"], maxLength: 1000 }
@@ -638,7 +922,7 @@ components:
         location: { type: [string, "null"], maxLength: 1000 }
         start: { type: "null" }
         end: { type: "null" }
-        updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        updated_at: { oneOf: [{ $ref: "#/components/schemas/Rfc3339Instant" }, { type: "null" }] }
         recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
     Device:
       type: object
@@ -773,16 +1057,17 @@ components:
                 {
                   type: object,
                   additionalProperties: false,
-                  required: [events, next_cursor],
+                  required: [events, next_cursor, omitted_count],
                   properties:
                     {
+                      omitted_count: { type: integer, minimum: 0, maximum: 250 },
                       events:
                         {
                           type: array,
                           maxItems: 250,
                           items: { $ref: "#/components/schemas/Event" },
                         },
-                      next_cursor: { type: [string, "null"], minLength: 16, maxLength: 2048 },
+                      next_cursor: { type: [string, "null"], minLength: 16, maxLength: 4096 },
                     },
                 },
             },
@@ -871,7 +1156,7 @@ components:
       }
     Error413:
       {
-        description: JSON body exceeds 16384 bytes.,
+        description: JSON body exceeds the route's byte limit.,
         headers:
           {
             Cache-Control: { $ref: "#/components/headers/NoStore" },

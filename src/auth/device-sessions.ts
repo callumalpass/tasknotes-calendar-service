@@ -1,8 +1,8 @@
 import { decodeBase64Url, encodeBase64Url } from "../crypto/base64url";
-import { constantTimeEqual } from "../crypto/digest";
+import { asArrayBuffer, constantTimeEqual } from "../crypto/digest";
 import { randomBytes } from "../crypto/random";
 import type { RandomByteSource } from "../crypto/random";
-import { isDeviceClientKind, isValidDeviceName } from "../domain/device";
+import { isDeviceClientKind } from "../domain/device";
 import type { DeviceClientKind } from "../domain/device";
 import { parseServiceCredential } from "../domain/service-credential";
 
@@ -13,7 +13,7 @@ const SESSION_ID_BYTES = 16;
 const CREDENTIAL_SECRET_BYTES = 32;
 const DIGEST_BYTES = 32;
 const IDLE_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
-const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
+export const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
 const LAST_USED_UPDATE_INTERVAL_SECONDS = 60 * 60;
 export const MAX_ACTIVE_DEVICE_SESSIONS = 100;
 const MAX_PRINCIPAL_ID_BYTES = 256;
@@ -30,16 +30,12 @@ export interface DeviceSessionDependencies {
   readonly random: RandomByteSource;
 }
 
-export interface CreateDeviceSessionInput {
-  readonly principalId: string;
-  readonly deviceName: string;
-  readonly clientKind: DeviceClientKind;
-}
-
 export interface RedeemSignInTransactionInput {
   readonly transactionId: string;
   readonly expectedPollingDigest: string;
   readonly expectedTasknotesPkceChallenge: string;
+  readonly expectedConfirmationDigest: string;
+  readonly webOriginAllowed: boolean;
 }
 
 export interface DeviceSessionMetadata {
@@ -99,24 +95,6 @@ export class DeviceSessionInputError extends Error {
   }
 }
 
-export class PrincipalUnavailableError extends Error {
-  public constructor() {
-    super("principal is unavailable");
-    this.name = "PrincipalUnavailableError";
-  }
-}
-
-export class DeviceSessionLimitError extends Error {
-  public constructor() {
-    super("active device session limit reached");
-    this.name = "DeviceSessionLimitError";
-  }
-}
-
-function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(bytes).buffer;
-}
-
 function validatedNow(clock: Clock): number {
   const now = clock.now();
   if (!(now instanceof Date) || !Number.isFinite(now.getTime()) || now.getTime() < 0) {
@@ -148,15 +126,6 @@ function isBoundedIdentifier(value: unknown, maximumBytes: number): value is str
 
 function validatePrincipalId(principalId: string): void {
   if (!isBoundedIdentifier(principalId, MAX_PRINCIPAL_ID_BYTES)) {
-    throw new DeviceSessionInputError();
-  }
-}
-
-function validateDevice(
-  deviceName: string,
-  clientKind: string,
-): asserts clientKind is DeviceClientKind {
-  if (!isValidDeviceName(deviceName) || !isDeviceClientKind(clientKind)) {
     throw new DeviceSessionInputError();
   }
 }
@@ -235,73 +204,14 @@ export class DeviceSessions {
     this.#random = dependencies.random;
   }
 
-  public async create(input: CreateDeviceSessionInput): Promise<CreatedDeviceSession> {
-    validatePrincipalId(input.principalId);
-    validateDevice(input.deviceName, input.clientKind);
-    const now = validatedNow(this.#clock);
-    const generated = await generateCredential(this.#pepper, this.#random);
-    const createdAt = now;
-    const idleExpiresAt = now + IDLE_LIFETIME_SECONDS;
-    const absoluteExpiresAt = now + ABSOLUTE_LIFETIME_SECONDS;
-
-    const result = await this.#db
-      .prepare(
-        `INSERT INTO device_sessions (
-          id, principal_id, credential_hash, device_name, client_kind, created_at,
-          last_used_at, idle_expires_at, absolute_expires_at, revoked_at,
-          redemption_transaction_id
-        )
-        SELECT ?, id, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
-        FROM principals
-        WHERE id = ?
-          AND (SELECT COUNT(*) FROM device_sessions
-               WHERE principal_id = principals.id AND revoked_at IS NULL
-                 AND idle_expires_at > ? AND absolute_expires_at > ?) < ?`,
-      )
-      .bind(
-        generated.id,
-        generated.digest,
-        input.deviceName,
-        input.clientKind,
-        createdAt,
-        createdAt,
-        idleExpiresAt,
-        absoluteExpiresAt,
-        input.principalId,
-        now,
-        now,
-        MAX_ACTIVE_DEVICE_SESSIONS,
-      )
-      .run();
-    if (result.meta.changes !== 1) {
-      const principal = await this.#db
-        .prepare("SELECT 1 FROM principals WHERE id = ?")
-        .bind(input.principalId)
-        .first();
-      if (principal !== null) throw new DeviceSessionLimitError();
-      throw new PrincipalUnavailableError();
-    }
-
-    return {
-      id: generated.id,
-      credential: generated.credential,
-      deviceName: input.deviceName,
-      clientKind: input.clientKind,
-      createdAt: toIso(createdAt),
-      lastUsedAt: toIso(createdAt),
-      idleExpiresAt: toIso(idleExpiresAt),
-      absoluteExpiresAt: toIso(absoluteExpiresAt),
-      revokedAt: null,
-    };
-  }
-
   public async redeemSignInTransaction(
     input: RedeemSignInTransactionInput,
   ): Promise<CreatedDeviceSession | null> {
     if (
       !isBoundedIdentifier(input.transactionId, 256) ||
       !isBoundedIdentifier(input.expectedPollingDigest, 256) ||
-      !isBoundedIdentifier(input.expectedTasknotesPkceChallenge, 128)
+      !isBoundedIdentifier(input.expectedTasknotesPkceChallenge, 128) ||
+      !isBoundedIdentifier(input.expectedConfirmationDigest, 256)
     ) {
       throw new DeviceSessionInputError();
     }
@@ -326,8 +236,10 @@ export class DeviceSessions {
           AND transaction_record.status = 'authorized'
           AND transaction_record.polling_secret_hash = ?
           AND transaction_record.tasknotes_pkce_challenge = ?
+          AND transaction_record.confirmation_code_hash = ?
           AND transaction_record.expires_at > ?
           AND transaction_record.authorized_principal_id IS NOT NULL
+          AND (transaction_record.client_kind <> 'web' OR ?)
           AND (SELECT COUNT(*) FROM device_sessions AS active_session
                WHERE active_session.principal_id = transaction_record.authorized_principal_id
                  AND active_session.revoked_at IS NULL
@@ -346,7 +258,9 @@ export class DeviceSessions {
         input.transactionId,
         input.expectedPollingDigest,
         input.expectedTasknotesPkceChallenge,
+        input.expectedConfirmationDigest,
         now,
+        input.webOriginAllowed ? 1 : 0,
         now,
         now,
         MAX_ACTIVE_DEVICE_SESSIONS,
@@ -360,6 +274,7 @@ export class DeviceSessions {
            AND status = 'authorized'
            AND polling_secret_hash = ?
            AND tasknotes_pkce_challenge = ?
+           AND confirmation_code_hash = ?
            AND expires_at > ?
            AND authorized_principal_id IS NOT NULL
            AND EXISTS (
@@ -375,6 +290,7 @@ export class DeviceSessions {
         input.transactionId,
         input.expectedPollingDigest,
         input.expectedTasknotesPkceChallenge,
+        input.expectedConfirmationDigest,
         now,
         generated.id,
       );
@@ -454,7 +370,8 @@ export class DeviceSessions {
              AND EXISTS (
                SELECT 1 FROM principals p
                WHERE p.id = device_sessions.principal_id
-             )`,
+             )
+           RETURNING *`,
         )
         .bind(
           lastUsedAt,
@@ -465,11 +382,21 @@ export class DeviceSessions {
           lastUsedAt,
           now - LAST_USED_UPDATE_INTERVAL_SECONDS,
         )
-        .run();
-      if (update.meta.changes !== 1) {
-        return null;
+        .first<SessionRow>();
+      if (update !== null) {
+        authenticatedRow = update;
+      } else {
+        const current = await this.#db
+          .prepare(
+            `SELECT s.* FROM device_sessions s JOIN principals p ON p.id = s.principal_id
+           WHERE s.id = ? AND s.principal_id = ? AND s.revoked_at IS NULL
+             AND s.idle_expires_at > ? AND s.absolute_expires_at > ?`,
+          )
+          .bind(row.id, row.principal_id, now, now)
+          .first<SessionRow>();
+        if (current === null) return null;
+        authenticatedRow = current;
       }
-      authenticatedRow = { ...row, last_used_at: lastUsedAt, idle_expires_at: idleExpiresAt };
     }
 
     return { principalId: row.principal_id, session: metadata(authenticatedRow) };

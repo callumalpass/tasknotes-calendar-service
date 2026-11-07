@@ -1,5 +1,14 @@
-import type { Calendar, EventsQuery, EventsResponse } from "../contracts";
-import { UuidSchema } from "../contracts";
+import type {
+  Calendar,
+  CalendarEvent,
+  CreateEventRequest,
+  PatchEventRequest,
+  ChangesQuery,
+  ChangesResponse,
+  EventsQuery,
+  EventsResponse,
+} from "../contracts";
+import { canonicalUuid } from "../contracts/common";
 import {
   GoogleAccessTokenError,
   type AccessGrant,
@@ -8,24 +17,42 @@ import {
 } from "../connections/google-access-tokens";
 import { encodeBase64Url } from "../crypto/base64url";
 import { openEventCursor, sealEventCursor, CursorError } from "../crypto/cursor";
+import { openEventId, createProviderEventId } from "../crypto/event-id";
+import { openSyncCursor, sealSyncCursor, type SyncCursorPayload } from "../crypto/cursor";
 import { randomBytes, type RandomByteSource } from "../crypto/random";
 import { mapProviderEvents, EventMappingError } from "../events/map-provider-events";
 import {
   listGoogleCalendarsPage,
   listGoogleEventsPage,
+  listGoogleChangesPage,
+  requestGoogleEvent,
+  retryAfter,
+  type GoogleEventRequest,
   type GoogleProviderConfiguration,
 } from "../provider/google";
-import type { ProviderCalendar, ProviderError } from "../provider/types";
+import type {
+  ProviderCalendar,
+  ProviderError,
+  ProviderOutcome,
+  ProviderEventBoundary,
+} from "../provider/types";
 
 // Discovery is an idempotent GET, so an expired attempt may be stolen. The lease is longer than
 // the configured provider timeout and uses D1's clock so Worker clock skew cannot create overlap.
 const LEASE_SECONDS = 45;
 const LOSER_DELAYS_MS = [50, 100, 200, 400, 800] as const;
 const RETRY_AFTER_SECONDS = 1;
-const MAX_RETRY_AFTER_SECONDS = 3_600;
 
 export type LiveGoogleCalendarErrorCode =
-  "invalid_request" | "not_found" | "reconnect" | "conflict" | "rate" | "unavailable" | "internal";
+  | "permission_denied"
+  | "sync_reset_required"
+  | "invalid_request"
+  | "not_found"
+  | "reconnect"
+  | "conflict"
+  | "rate"
+  | "unavailable"
+  | "internal";
 
 export class LiveGoogleCalendarError extends Error {
   public readonly code: LiveGoogleCalendarErrorCode;
@@ -55,7 +82,7 @@ export interface LiveGoogleCalendarDependencies {
   readonly providerTimeoutMs?: number;
 }
 
-interface DiscoveryRow {
+interface AuthorityRow {
   readonly id: string;
   readonly principal_id: string;
   readonly status: "active" | "reconnect_required";
@@ -64,9 +91,12 @@ interface DiscoveryRow {
   readonly principal_generation: number;
   readonly discovery_lease_owner: string | null;
   readonly discovery_lease_until: number | null;
-  readonly last_provider_success_at: number | null;
   readonly discovery_version: number;
   readonly server_now: number;
+}
+
+interface DiscoveryRow extends AuthorityRow {
+  readonly discovered_at: number | null;
 }
 
 interface CalendarRow {
@@ -74,14 +104,15 @@ interface CalendarRow {
   readonly connection_id: string;
   readonly name: string;
   readonly description: string | null;
-  readonly color: string | null;
+  readonly access_role: "reader" | "writer" | "owner";
   readonly time_zone: string | null;
   readonly is_primary: number;
 }
 
-interface EventGrantRow extends DiscoveryRow {
+interface EventGrantRow extends AuthorityRow {
   readonly calendar_id: string;
   readonly provider_calendar_id: string;
+  readonly access_role: "reader" | "writer" | "owner";
 }
 
 interface DiscoveryAuthority {
@@ -97,26 +128,13 @@ function fail(code: LiveGoogleCalendarErrorCode, retryAfterSeconds?: number): ne
   throw new LiveGoogleCalendarError(code, retryAfterSeconds);
 }
 
-function retryAfter(error: ProviderError): number | undefined {
-  const value = error.retryAfterSeconds;
-  return value !== undefined && Number.isSafeInteger(value) && value >= 0
-    ? Math.min(value, MAX_RETRY_AFTER_SECONDS)
-    : undefined;
-}
-
-function canonicalUuid(value: unknown): string {
-  const parsed = UuidSchema.safeParse(value);
-  if (!parsed.success || parsed.data !== value) return fail("internal");
-  return parsed.data;
-}
-
 function now(dependencies: LiveGoogleCalendarDependencies): number {
   const value = dependencies.nowEpochSeconds();
   if (!Number.isSafeInteger(value) || value < 0) return fail("internal");
   return value;
 }
 
-function authority(row: DiscoveryRow): DiscoveryAuthority {
+function authority(row: AuthorityRow): DiscoveryAuthority {
   if (
     row.status !== "active" ||
     !Number.isSafeInteger(row.generation) ||
@@ -129,8 +147,8 @@ function authority(row: DiscoveryRow): DiscoveryAuthority {
   )
     return fail("internal");
   return {
-    principalId: canonicalUuid(row.principal_id),
-    connectionId: canonicalUuid(row.id),
+    principalId: canonicalUuid(row.principal_id) ?? fail("internal"),
+    connectionId: canonicalUuid(row.id) ?? fail("internal"),
     generation: row.generation,
     tokenVersion: row.token_version,
     principalGeneration: row.principal_generation,
@@ -138,7 +156,7 @@ function authority(row: DiscoveryRow): DiscoveryAuthority {
   };
 }
 
-function sameAuthority(left: DiscoveryAuthority, right: DiscoveryRow): boolean {
+function sameAuthority(left: DiscoveryAuthority, right: AuthorityRow): boolean {
   return (
     right.id === left.connectionId &&
     right.principal_id === left.principalId &&
@@ -149,11 +167,11 @@ function sameAuthority(left: DiscoveryAuthority, right: DiscoveryRow): boolean {
 
 function publicCalendar(row: CalendarRow): Calendar {
   const value = {
-    id: canonicalUuid(row.id),
-    connection_id: canonicalUuid(row.connection_id),
+    id: canonicalUuid(row.id) ?? fail("internal"),
+    connection_id: canonicalUuid(row.connection_id) ?? fail("internal"),
     name: row.name,
     description: row.description,
-    color: row.color,
+    can_write: row.access_role === "writer" || row.access_role === "owner",
     time_zone: row.time_zone,
     is_primary: row.is_primary === 1,
   };
@@ -163,27 +181,23 @@ function publicCalendar(row: CalendarRow): Calendar {
 
 export class LiveGoogleCalendar {
   readonly #dependencies: LiveGoogleCalendarDependencies;
-  readonly #discoveries = new Map<string, Promise<{ calendars: Calendar[] }>>();
-
   public constructor(dependencies: LiveGoogleCalendarDependencies) {
     if (dependencies.cursorKey.byteLength !== 32 || dependencies.eventIdKey.byteLength !== 32)
       throw new TypeError("live calendar keys must be exactly 32 bytes");
     this.#dependencies = dependencies;
   }
 
-  public listCalendars(authenticatedPrincipalId: string): Promise<{ calendars: Calendar[] }> {
-    canonicalUuid(authenticatedPrincipalId);
-    const active = this.#discoveries.get(authenticatedPrincipalId);
-    if (active !== undefined) return active;
-    const discovery = this.#listCalendars(authenticatedPrincipalId).finally(() => {
-      if (this.#discoveries.get(authenticatedPrincipalId) === discovery)
-        this.#discoveries.delete(authenticatedPrincipalId);
-    });
-    this.#discoveries.set(authenticatedPrincipalId, discovery);
-    return discovery;
-  }
-
-  async #listCalendars(authenticatedPrincipalId: string): Promise<{ calendars: Calendar[] }> {
+  public async listCalendars(authenticatedPrincipalId: string): Promise<{ calendars: Calendar[] }> {
+    if (canonicalUuid(authenticatedPrincipalId) === undefined) fail("internal");
+    const cached = await this.#discoveryRow(authenticatedPrincipalId);
+    if (
+      cached?.status === "active" &&
+      cached.discovery_version > 0 &&
+      cached.discovered_at !== null &&
+      cached.discovered_at > cached.server_now - 300
+    ) {
+      return { calendars: await this.#readCalendars(authority(cached)) };
+    }
     let snapshot: ConnectionSnapshot | null;
     try {
       snapshot = await this.#dependencies.accessTokens.loadForPrincipal(authenticatedPrincipalId);
@@ -200,48 +214,46 @@ export class LiveGoogleCalendar {
     let current = await this.#discoveryRow(authenticatedPrincipalId);
     if (current?.status !== "active") return this.#staleDiscovery(current);
     const expected = authority(current);
-    if (!this.#grantMatches(grant, expected)) return fail("conflict");
+    if (!this.#grantAuthorityMatches(grant, expected)) return fail("conflict");
 
-    for (;;) {
-      const owner = this.#owner();
-      if (await this.#acquire(expected, owner)) {
-        return this.#discoverAsOwner(expected, grant, owner, false);
-      }
-      let acquired = false;
-      for (const delay of LOSER_DELAYS_MS) {
-        current = await this.#discoveryRow(authenticatedPrincipalId);
-        if (current === null || !sameAuthority(expected, current) || current.status !== "active")
-          return this.#staleDiscovery(current);
-        if (
-          current.discovery_lease_owner === null &&
-          current.discovery_version === expected.discoveryVersion + 1
-        ) {
-          return { calendars: await this.#readCalendars(expected) };
-        }
-        if (
-          current.discovery_lease_owner === null ||
-          (current.discovery_lease_until ?? 0) <= current.server_now
-        ) {
-          acquired = await this.#acquire(expected, owner);
-          if (acquired) break;
-        }
-        try {
-          await this.#dependencies.sleep(delay);
-        } catch {
-          return fail("internal");
-        }
-      }
-      if (acquired) return this.#discoverAsOwner(expected, grant, owner, false);
+    const owner = this.#owner();
+    if (await this.#acquire(expected, owner)) {
+      return this.#discoverAsOwner(expected, grant, owner, false);
+    }
+    let acquired = false;
+    for (const delay of LOSER_DELAYS_MS) {
       current = await this.#discoveryRow(authenticatedPrincipalId);
       if (current === null || !sameAuthority(expected, current) || current.status !== "active")
         return this.#staleDiscovery(current);
       if (
         current.discovery_lease_owner === null &&
         current.discovery_version === expected.discoveryVersion + 1
-      )
+      ) {
         return { calendars: await this.#readCalendars(expected) };
-      return fail("unavailable", RETRY_AFTER_SECONDS);
+      }
+      if (
+        current.discovery_lease_owner === null ||
+        (current.discovery_lease_until ?? 0) <= current.server_now
+      ) {
+        acquired = await this.#acquire(expected, owner);
+        if (acquired) break;
+      }
+      try {
+        await this.#dependencies.sleep(delay);
+      } catch {
+        return fail("internal");
+      }
     }
+    if (acquired) return this.#discoverAsOwner(expected, grant, owner, false);
+    current = await this.#discoveryRow(authenticatedPrincipalId);
+    if (current === null || !sameAuthority(expected, current) || current.status !== "active")
+      return this.#staleDiscovery(current);
+    if (
+      current.discovery_lease_owner === null &&
+      current.discovery_version === expected.discoveryVersion + 1
+    )
+      return { calendars: await this.#readCalendars(expected) };
+    return fail("unavailable", RETRY_AFTER_SECONDS);
   }
 
   public async listEvents(
@@ -249,8 +261,8 @@ export class LiveGoogleCalendar {
     publicCalendarId: string,
     query: EventsQuery,
   ): Promise<EventsResponse> {
-    canonicalUuid(authenticatedPrincipalId);
-    canonicalUuid(publicCalendarId);
+    if (canonicalUuid(authenticatedPrincipalId) === undefined) fail("internal");
+    if (canonicalUuid(publicCalendarId) === undefined) fail("internal");
     const resolved = await this.#eventGrant(authenticatedPrincipalId, publicCalendarId);
     if (resolved === null) return fail("not_found");
     const expected = authority(resolved);
@@ -268,28 +280,9 @@ export class LiveGoogleCalendar {
         return fail("internal");
       }
     }
-    let snapshot: ConnectionSnapshot | null;
-    let grant: AccessGrant;
-    try {
-      snapshot = await this.#dependencies.accessTokens.loadForPrincipal(authenticatedPrincipalId);
-      if (snapshot === null || !this.#snapshotMatches(snapshot, expected)) return fail("not_found");
-      grant = await this.#dependencies.accessTokens.access(snapshot);
-    } catch (error) {
-      if (error instanceof LiveGoogleCalendarError) throw error;
-      if (error instanceof GoogleAccessTokenError && ["conflict", "reconnect"].includes(error.code))
-        return fail("not_found");
-      return this.#tokenFailure(error);
-    }
-    let result = await this.#eventsPage(grant, resolved.provider_calendar_id, query, pageToken);
-    if (!result.ok && result.error.code === "unauthorized") {
-      try {
-        grant = await this.#dependencies.accessTokens.access(snapshot, { forceRefresh: true });
-      } catch (error) {
-        return this.#tokenFailure(error);
-      }
-      if (!this.#grantAuthorityMatches(grant, expected)) return fail("not_found");
-      result = await this.#eventsPage(grant, resolved.provider_calendar_id, query, pageToken);
-    }
+    const result = await this.#authorizedOperation(resolved, (grant) =>
+      this.#eventsPage(grant, resolved.provider_calendar_id, query, pageToken),
+    );
     if (!result.ok) return this.#eventProviderFailure(result.error);
     let events;
     try {
@@ -318,6 +311,28 @@ export class LiveGoogleCalendar {
         return fail("internal");
       }
     }
+    await this.#assertCalendarCurrent(resolved);
+    return {
+      events: [...events],
+      next_cursor: nextCursor,
+      omitted_count: result.value.omittedCount ?? 0,
+    };
+  }
+
+  #eventBinding(calendarId: string) {
+    return {
+      environment: this.#dependencies.environment,
+      provider: "google",
+      authorizationScopedCalendarId: calendarId,
+    } as const;
+  }
+
+  async #assertCalendarCurrent(expected: EventGrantRow): Promise<void> {
+    const current = await this.#eventGrant(expected.principal_id, expected.calendar_id);
+    if (current === null || !sameAuthority(authority(expected), current)) return fail("not_found");
+  }
+
+  async #assertCurrent(grant: AccessGrant): Promise<void> {
     try {
       await this.#dependencies.accessTokens.assertCurrent(grant);
     } catch (error) {
@@ -325,7 +340,199 @@ export class LiveGoogleCalendar {
         return fail("not_found");
       return this.#tokenFailure(error);
     }
-    return { events: [...events], next_cursor: nextCursor };
+  }
+
+  async #authorizedOperation<T>(
+    resolved: EventGrantRow,
+    operation: (grant: AccessGrant) => Promise<ProviderOutcome<T>>,
+  ): Promise<ProviderOutcome<T>> {
+    const expected = authority(resolved);
+    try {
+      const snapshot = await this.#dependencies.accessTokens.loadForPrincipal(expected.principalId);
+      if (snapshot === null || !this.#snapshotMatches(snapshot, expected)) return fail("not_found");
+      let grant = await this.#dependencies.accessTokens.access(snapshot);
+      if (!this.#grantAuthorityMatches(grant, expected)) return fail("not_found");
+      await this.#assertCurrent(grant);
+      let result = await operation(grant);
+      if (!result.ok && result.error.code === "unauthorized") {
+        const loaded = await this.#dependencies.accessTokens.loadForPrincipal(expected.principalId);
+        if (loaded === null || !this.#snapshotMatches(loaded, expected)) return fail("not_found");
+        grant = await this.#dependencies.accessTokens.access(loaded, { forceRefresh: true });
+        if (!this.#grantAuthorityMatches(grant, expected)) return fail("not_found");
+        await this.#assertCurrent(grant);
+        result = await operation(grant);
+      }
+      await this.#assertCurrent(grant);
+      return result;
+    } catch (error) {
+      return this.#tokenFailure(error);
+    }
+  }
+
+  public async listChanges(
+    principalId: string,
+    calendarId: string,
+    query: ChangesQuery,
+  ): Promise<ChangesResponse> {
+    const resolved = await this.#eventGrant(principalId, calendarId);
+    if (resolved === null) return fail("not_found");
+    const binding = {
+      principalId,
+      connectionId: resolved.id,
+      connectionGeneration: resolved.generation,
+      calendarId,
+    };
+    let cursor: SyncCursorPayload = {};
+    if (query.cursor !== undefined) {
+      try {
+        cursor = await openSyncCursor(query.cursor, binding, this.#dependencies.cursorKey);
+      } catch {
+        return fail("invalid_request");
+      }
+    }
+    const result = await this.#authorizedOperation(resolved, (grant) =>
+      listGoogleChangesPage({
+        ...cursor,
+        accessToken: grant.accessToken,
+        calendarId: resolved.provider_calendar_id,
+        configuration: this.#dependencies.googleProvider,
+        fetch: this.#dependencies.fetch,
+        ...(this.#dependencies.providerTimeoutMs === undefined
+          ? {}
+          : { timeoutMs: this.#dependencies.providerTimeoutMs }),
+      }),
+    );
+    if (!result.ok) {
+      if (result.error.code === "gone") return fail("sync_reset_required");
+      return this.#eventProviderFailure(result.error);
+    }
+    const events = await mapProviderEvents(result.value.items, {
+      ...this.#eventBinding(calendarId),
+      eventIdKey: this.#dependencies.eventIdKey,
+    });
+    const next = result.value.nextPageToken;
+    const sync = result.value.nextSyncToken;
+    const nextCursor =
+      next === undefined
+        ? null
+        : await sealSyncCursor(
+            {
+              ...(cursor.syncToken === undefined ? {} : { syncToken: cursor.syncToken }),
+              pageToken: next,
+            },
+            binding,
+            this.#dependencies.cursorKey,
+            this.#dependencies.random,
+          );
+    const syncCursor =
+      sync === undefined
+        ? null
+        : await sealSyncCursor(
+            { syncToken: sync },
+            binding,
+            this.#dependencies.cursorKey,
+            this.#dependencies.random,
+          );
+    await this.#assertCalendarCurrent(resolved);
+    return {
+      events: [...events],
+      omitted_count: result.value.omittedCount ?? 0,
+      next_cursor: nextCursor,
+      sync_cursor: syncCursor,
+    };
+  }
+
+  public async event(
+    principalId: string,
+    calendarId: string,
+    method: GoogleEventRequest["method"],
+    eventId?: string,
+    body?: CreateEventRequest | PatchEventRequest,
+    ifMatch?: string,
+  ): Promise<CalendarEvent | undefined> {
+    const resolved = await this.#eventGrant(principalId, calendarId);
+    if (resolved === null) return fail("not_found");
+    const binding = this.#eventBinding(calendarId);
+    let providerId: string;
+    if (method === "POST") {
+      providerId = await createProviderEventId(
+        principalId,
+        (body as CreateEventRequest).idempotency_key,
+        binding,
+        this.#dependencies.eventIdKey,
+      );
+    } else {
+      try {
+        providerId = await openEventId(eventId ?? "", binding, this.#dependencies.eventIdKey);
+      } catch {
+        return fail("not_found");
+      }
+    }
+    if (method !== "GET" && resolved.access_role === "reader") return fail("permission_denied");
+    const request = (
+      operation: GoogleEventRequest["method"],
+      payload?: Readonly<Record<string, unknown>>,
+    ) =>
+      this.#authorizedOperation(resolved, (grant) =>
+        requestGoogleEvent({
+          accessToken: grant.accessToken,
+          calendarId: resolved.provider_calendar_id,
+          eventId: providerId,
+          method: operation,
+          ...(payload === undefined ? {} : { body: payload }),
+          ...(operation === "PATCH" || operation === "DELETE" ? { ifMatch: ifMatch ?? "" } : {}),
+          configuration: this.#dependencies.googleProvider,
+          fetch: this.#dependencies.fetch,
+          ...(this.#dependencies.providerTimeoutMs === undefined
+            ? {}
+            : { timeoutMs: this.#dependencies.providerTimeoutMs }),
+        }),
+      );
+    if ((method === "PATCH" || method === "DELETE") && !ifMatch) return fail("invalid_request");
+    if (method === "PATCH") {
+      const current = await request("GET");
+      if (!current.ok) return this.#eventProviderFailure(current.error);
+      if (current.value === undefined || current.value.status === "cancelled")
+        return fail("not_found");
+      if (body?.recurrence !== undefined && current.value.recurrence !== undefined)
+        return fail("invalid_request");
+      const start = body?.start ?? publicEventBoundary(current.value.start);
+      const end = body?.end ?? publicEventBoundary(current.value.end);
+      if (!boundariesOrdered(start, end)) return fail("invalid_request");
+    }
+    const payload =
+      body === undefined
+        ? undefined
+        : providerWrite(body, method === "POST" ? providerId : undefined);
+    let result = await request(method, payload);
+    if (!result.ok && result.error.code === "invalid_request") return fail("invalid_request");
+    if (method === "POST" && !result.ok && result.error.code === "duplicate") {
+      result = await request("GET");
+      if (!result.ok && (result.error.code === "gone" || result.error.code === "not_found"))
+        return fail("conflict");
+      if (result.ok && result.value?.status === "cancelled") return fail("conflict");
+    }
+    if (method === "DELETE" && !result.ok) {
+      // Google answers a stale If-Match with 412 even when the event is already deleted.
+      const gone = result.error.code === "precondition" ? await request("GET") : result;
+      if (
+        gone.ok
+          ? gone.value?.status === "cancelled"
+          : gone.error.code === "gone" || gone.error.code === "not_found"
+      )
+        return undefined;
+    }
+    if (!result.ok) return this.#eventProviderFailure(result.error);
+    if (method === "DELETE") return undefined;
+    if (result.value === undefined) return fail("unavailable");
+    if (result.value.status === "cancelled") return fail("not_found");
+    const [mapped] = await mapProviderEvents([result.value], {
+      ...binding,
+      eventIdKey: this.#dependencies.eventIdKey,
+    });
+    if (mapped === undefined) return fail("internal");
+    await this.#assertCalendarCurrent(resolved);
+    return mapped;
   }
 
   #cursorBinding(authority: DiscoveryAuthority, calendarId: string, query: EventsQuery) {
@@ -365,12 +572,6 @@ export class LiveGoogleCalendar {
     );
   }
 
-  #grantMatches(grant: AccessGrant, expected: DiscoveryAuthority): boolean {
-    return (
-      this.#grantAuthorityMatches(grant, expected) && grant.tokenVersion === expected.tokenVersion
-    );
-  }
-
   async #discoveryRow(principalId: string): Promise<DiscoveryRow | null> {
     try {
       return await this.#dependencies.db
@@ -379,8 +580,9 @@ export class LiveGoogleCalendar {
                   connection.token_version,
                   principal.google_connection_generation AS principal_generation,
                   connection.discovery_lease_owner, connection.discovery_lease_until,
-                  connection.last_provider_success_at, connection.discovery_version,
-                  unixepoch() AS server_now
+                  connection.discovery_version, unixepoch() AS server_now,
+                  (SELECT MAX(calendar.updated_at) FROM calendars AS calendar
+                   WHERE calendar.connection_id = connection.id) AS discovered_at
            FROM connections AS connection JOIN principals AS principal
              ON principal.id = connection.principal_id
            WHERE connection.principal_id = ? AND connection.provider = 'google' LIMIT 1`,
@@ -400,9 +602,9 @@ export class LiveGoogleCalendar {
                   connection.token_version,
                   principal.google_connection_generation AS principal_generation,
                   connection.discovery_lease_owner, connection.discovery_lease_until,
-                  connection.last_provider_success_at, connection.discovery_version,
-                  unixepoch() AS server_now, calendar.id AS calendar_id,
-                  calendar.provider_calendar_id
+                  connection.discovery_version, unixepoch() AS server_now,
+                  calendar.id AS calendar_id,
+                  calendar.provider_calendar_id, calendar.access_role
            FROM calendars AS calendar
            JOIN connections AS connection ON connection.id = calendar.connection_id
              AND connection.principal_id = calendar.principal_id
@@ -569,7 +771,7 @@ export class LiveGoogleCalendar {
       ids.add(calendar.id);
       try {
         candidates.push({
-          id: canonicalUuid(this.#dependencies.uuid()),
+          id: canonicalUuid(this.#dependencies.uuid()) ?? fail("internal"),
           providerId: calendar.id,
           name: calendar.name,
           description: calendar.description ?? null,
@@ -598,11 +800,10 @@ export class LiveGoogleCalendar {
                FROM json_each(?)
              )
              INSERT INTO calendars
-               (id, principal_id, connection_id, provider_calendar_id, name, description, color,
-                time_zone, access_role, is_primary, etag, discovered_at, updated_at)
-             SELECT input.id, ?, ?, input.provider_id, input.name, input.description, NULL,
-                    input.time_zone, input.access_role, input.is_primary, NULL,
-                    unixepoch(), unixepoch()
+               (id, principal_id, connection_id, provider_calendar_id, name, description,
+                time_zone, access_role, is_primary, discovered_at, updated_at)
+             SELECT input.id, ?, ?, input.provider_id, input.name, input.description,
+                    input.time_zone, input.access_role, input.is_primary, unixepoch(), unixepoch()
              FROM input
              WHERE EXISTS (SELECT 1 FROM connections AS connection JOIN principals AS principal
                ON principal.id = connection.principal_id
@@ -615,10 +816,9 @@ export class LiveGoogleCalendar {
                  AND connection.discovery_lease_token_version = ?
                  AND principal.google_connection_generation = ?)
              ON CONFLICT(connection_id, provider_calendar_id) DO UPDATE SET
-               name = excluded.name, description = excluded.description, color = NULL,
+               name = excluded.name, description = excluded.description,
                time_zone = excluded.time_zone, access_role = excluded.access_role,
-               is_primary = excluded.is_primary, etag = NULL,
-               updated_at = MAX(unixepoch(), calendars.updated_at)
+               is_primary = excluded.is_primary, updated_at = MAX(unixepoch(), calendars.updated_at)
              WHERE calendars.principal_id = excluded.principal_id`,
           )
           .bind(
@@ -751,14 +951,14 @@ export class LiveGoogleCalendar {
       const result = await this.#dependencies.db
         .prepare(
           `SELECT calendar.id, calendar.connection_id, calendar.name, calendar.description,
-                  calendar.color, calendar.time_zone, calendar.is_primary
+                  calendar.access_role, calendar.time_zone, calendar.is_primary
            FROM calendars AS calendar JOIN connections AS connection
              ON connection.id = calendar.connection_id
              AND connection.principal_id = calendar.principal_id
            JOIN principals AS principal ON principal.id = connection.principal_id
            WHERE calendar.principal_id = ? AND calendar.connection_id = ?
              AND connection.provider = 'google' AND connection.status = 'active'
-             AND connection.generation = ? AND connection.token_version = ?
+             AND connection.generation = ?
              AND principal.google_connection_generation = ?
            ORDER BY calendar.is_primary DESC, calendar.name, calendar.id`,
         )
@@ -766,7 +966,6 @@ export class LiveGoogleCalendar {
           expected.principalId,
           expected.connectionId,
           expected.generation,
-          expected.tokenVersion,
           expected.principalGeneration,
         )
         .all<CalendarRow>();
@@ -812,6 +1011,8 @@ export class LiveGoogleCalendar {
   }
 
   #eventProviderFailure(error: ProviderError): never {
+    if (error.code === "precondition" || error.code === "duplicate") return fail("conflict");
+    if (error.code === "gone") return fail("not_found");
     if (error.code === "permission_denied" || error.code === "not_found") return fail("not_found");
     if (error.code === "rate_limited")
       return fail("rate", retryAfter(error) ?? RETRY_AFTER_SECONDS);
@@ -833,4 +1034,50 @@ export class LiveGoogleCalendar {
     if (row?.status === "reconnect_required") return fail("reconnect");
     return fail("conflict");
   }
+}
+
+function publicEventBoundary(boundary: ProviderEventBoundary) {
+  return boundary.kind === "all_day"
+    ? { kind: "date" as const, date: boundary.date }
+    : {
+        kind: "date_time" as const,
+        date_time: boundary.dateTime,
+        ...(boundary.timeZone === undefined ? {} : { time_zone: boundary.timeZone }),
+      };
+}
+
+function boundariesOrdered(
+  start: NonNullable<PatchEventRequest["start"]>,
+  end: NonNullable<PatchEventRequest["end"]>,
+): boolean {
+  return start.kind === "date" && end.kind === "date"
+    ? start.date <= end.date
+    : start.kind === "date_time" &&
+        end.kind === "date_time" &&
+        Date.parse(start.date_time) <= Date.parse(end.date_time);
+}
+
+function providerWrite(
+  body: CreateEventRequest | PatchEventRequest,
+  id?: string,
+): Readonly<Record<string, unknown>> {
+  // Google merges nested PATCH objects, so changing boundary kind must null the other kind's fields.
+  const boundary = (value: NonNullable<PatchEventRequest["start"]>) =>
+    value.kind === "date"
+      ? { date: value.date, ...(id === undefined ? { dateTime: null, timeZone: null } : {}) }
+      : {
+          dateTime: value.date_time,
+          ...(value.time_zone === undefined ? {} : { timeZone: value.time_zone }),
+          ...(id === undefined ? { date: null } : {}),
+        };
+  return {
+    ...(id === undefined ? {} : { id }),
+    ...(body.title === undefined ? {} : { summary: body.title }),
+    ...(body.description === undefined ? {} : { description: body.description }),
+    ...(body.location === undefined ? {} : { location: body.location }),
+    ...(body.transparency === undefined ? {} : { transparency: body.transparency }),
+    ...(body.recurrence === undefined ? {} : { recurrence: body.recurrence }),
+    ...(body.start === undefined ? {} : { start: boundary(body.start) }),
+    ...(body.end === undefined ? {} : { end: boundary(body.end) }),
+  };
 }

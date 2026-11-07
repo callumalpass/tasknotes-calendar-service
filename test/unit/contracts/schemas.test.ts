@@ -12,7 +12,8 @@ const id = "550e8400-e29b-41d4-a716-446655440000";
 
 function timedEvent() {
   return {
-    id,
+    id: `e1_${"a".repeat(39)}`,
+    etag: '"1"',
     calendar_id: id,
     status: "confirmed",
     title: "Planning",
@@ -82,7 +83,7 @@ describe("public contract schemas", () => {
     const range = { start: "2026-01-01T00:00:00Z", end: "2026-01-02T00:00:00Z" };
     expect(EventsQuerySchema.safeParse({ ...range, cursor: "c".repeat(16) }).success).toBe(true);
     expect(EventsQuerySchema.safeParse({ ...range, cursor: "short" }).success).toBe(false);
-    expect(EventsQuerySchema.safeParse({ ...range, cursor: "c".repeat(2049) }).success).toBe(false);
+    expect(EventsQuerySchema.safeParse({ ...range, cursor: "c".repeat(4097) }).success).toBe(false);
     expect(EventsQuerySchema.safeParse({ ...range, calendar_id: id }).success).toBe(false);
   });
 
@@ -92,7 +93,7 @@ describe("public contract schemas", () => {
       connection_id: id,
       name: "😀".repeat(500),
       description: "😀".repeat(4000),
-      color: null,
+      can_write: true,
       time_zone: "Europe/London",
       is_primary: true,
     };
@@ -108,23 +109,30 @@ describe("public contract schemas", () => {
 
   it("enforces strict scheduled variants, ordered matching boundaries, and recurrence", () => {
     expect(EventSchema.safeParse(timedEvent()).success).toBe(true);
+    expect(EventSchema.safeParse({ ...timedEvent(), end: timedEvent().start }).success).toBe(true);
     expect(EventSchema.safeParse({ ...timedEvent(), title: "😀".repeat(1000) }).success).toBe(true);
     expect(EventSchema.safeParse({ ...timedEvent(), title: "😀".repeat(1001) }).success).toBe(
       false,
     );
     for (const event of [
       { ...timedEvent(), end: { kind: "date", date: "2026-09-02" } },
-      { ...timedEvent(), end: timedEvent().start },
       { ...timedEvent(), start: timedEvent().end, end: timedEvent().start },
       { ...timedEvent(), attendees: [] },
       { ...timedEvent(), recurrence: undefined },
       {
         ...timedEvent(),
-        recurrence: { series_id: id, original_start: { kind: "date", date: "2026-09-01" } },
+        recurrence: {
+          series_id: `e1_${"a".repeat(39)}`,
+          original_start: { kind: "date", date: "2026-09-01" },
+        },
       },
       {
         ...timedEvent(),
-        recurrence: { series_id: id, original_start: timedEvent().start, extra: true },
+        recurrence: {
+          series_id: `e1_${"a".repeat(39)}`,
+          original_start: timedEvent().start,
+          extra: true,
+        },
       },
     ]) {
       expect(EventSchema.safeParse(event).success).toBe(false);
@@ -178,6 +186,6 @@ describe("public contract schemas", () => {
     expect(
       ProviderCallbackQuerySchema.safeParse({ code: "c".repeat(32), state, unrelated: "x" })
         .success,
-    ).toBe(false);
+    ).toBe(true);
   });
 });

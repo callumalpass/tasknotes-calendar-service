@@ -49,6 +49,11 @@ export const TransactionRedeemRequestSchema = z.strictObject({
   code_verifier: PkceVerifierSchema,
 });
 
+export const ConfirmationCodeSchema = z.string().regex(/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}$/);
+export const SignInRedeemRequestSchema = TransactionRedeemRequestSchema.extend({
+  confirmation_code: ConfirmationCodeSchema,
+});
+
 export const SessionCredentialSchema = z.strictObject({
   credential: ServiceCredentialSchema,
   session_id: DeviceSessionIdSchema,
@@ -57,35 +62,21 @@ export const SessionCredentialSchema = z.strictObject({
 });
 
 export const SignInRedeemResponseSchema = z.strictObject({ session: SessionCredentialSchema });
+export const WebSignInRedeemResponseSchema = z.strictObject({
+  session: SessionCredentialSchema.omit({ credential: true }),
+});
 
 export const ConnectRedeemResponseSchema = z.strictObject({
   connection_id: UuidSchema,
   status: z.literal("active"),
 });
 
-const CallbackMetadataSchema = {
-  scope: z
-    .string()
-    .regex(/^[\u0020-\u007e]{1,2048}$/)
-    .optional(),
-  authuser: z
-    .string()
-    .regex(/^\d{1,10}$/)
-    .optional(),
-  prompt: z
-    .string()
-    .regex(/^[A-Za-z0-9 _-]{1,128}$/)
-    .optional(),
-  iss: z.enum(["https://accounts.google.com", "accounts.google.com"]).optional(),
-} as const;
-
 export const ProviderCallbackQuerySchema = z.union([
-  z.strictObject({ code: OpaqueSecretSchema, state: OAuthStateSchema, ...CallbackMetadataSchema }),
-  z.strictObject({
+  z.object({ code: OpaqueSecretSchema, state: OAuthStateSchema, error: z.never().optional() }),
+  z.object({
     error: z.string().regex(/^[A-Za-z0-9._~-]{1,128}$/),
     state: OAuthStateSchema,
-    error_description: z.string().max(1024).optional(),
-    error_uri: z.url().max(2048).optional(),
+    code: z.never().optional(),
   }),
 ]);
 

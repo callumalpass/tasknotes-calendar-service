@@ -46,7 +46,7 @@ export const CalendarSchema = z.strictObject({
   connection_id: UuidSchema,
   name: boundedCodePointText(500, false),
   description: boundedCodePointText(4000).nullable(),
-  color: boundedCodePointText(32).nullable(),
+  can_write: z.boolean(),
   time_zone: boundedCodePointText(100, false).nullable(),
   is_primary: z.boolean(),
 });
@@ -68,7 +68,19 @@ export const EventsQuerySchema = z
 const TimedBoundarySchema = z.strictObject({
   kind: z.literal("date_time"),
   date_time: Rfc3339InstantSchema,
-  time_zone: z.string().min(1).max(100).optional(),
+  time_zone: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine((value) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: value });
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .optional(),
 });
 
 const AllDayBoundarySchema = z.strictObject({
@@ -81,8 +93,15 @@ export const EventBoundarySchema = z.discriminatedUnion("kind", [
   AllDayBoundarySchema,
 ]);
 
+export const EventIdSchema = z.string().regex(/^e1_[A-Za-z0-9_-]{39,1403}$/u);
+export const EtagSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[\x21-\x7e]+$/u);
+
 const EventRecurrenceSchema = z.strictObject({
-  series_id: UuidSchema,
+  series_id: EventIdSchema,
   original_start: EventBoundarySchema,
 });
 
@@ -94,17 +113,20 @@ function eventTextSchema(maximumCharacters: number) {
 }
 
 const eventCommonShape = {
-  id: UuidSchema,
+  id: EventIdSchema,
+  etag: EtagSchema.nullable(),
   calendar_id: UuidSchema,
   title: eventTextSchema(1000).nullable(),
   description: eventTextSchema(16_000).nullable(),
   location: eventTextSchema(1000).nullable(),
-  updated_at: Rfc3339InstantSchema,
+  updated_at: Rfc3339InstantSchema.nullable(),
   recurrence: EventRecurrenceSchema.nullable(),
 } as const;
 
 const ConfirmedEventSchema = z.strictObject({
   ...eventCommonShape,
+  updated_at: Rfc3339InstantSchema,
+  etag: EtagSchema,
   status: z.literal("confirmed"),
   start: EventBoundarySchema,
   end: EventBoundarySchema,
@@ -112,6 +134,8 @@ const ConfirmedEventSchema = z.strictObject({
 
 const TentativeEventSchema = z.strictObject({
   ...eventCommonShape,
+  updated_at: Rfc3339InstantSchema,
+  etag: EtagSchema,
   status: z.literal("tentative"),
   start: EventBoundarySchema,
   end: EventBoundarySchema,
@@ -130,8 +154,8 @@ function boundaryPrecedes(
 ): boolean {
   if (left.kind !== right.kind) return false;
   return left.kind === "date"
-    ? left.date < (right as z.infer<typeof AllDayBoundarySchema>).date
-    : Date.parse(left.date_time) <
+    ? left.date <= (right as z.infer<typeof AllDayBoundarySchema>).date
+    : Date.parse(left.date_time) <=
         Date.parse((right as z.infer<typeof TimedBoundarySchema>).date_time);
 }
 
@@ -146,7 +170,7 @@ export const EventSchema = z
     if (!boundaryPrecedes(event.start, event.end)) {
       context.addIssue({
         code: "custom",
-        message: "Event boundaries must have matching kinds and increase strictly.",
+        message: "Event boundaries must have matching kinds and not decrease.",
       });
       return;
     }
@@ -164,8 +188,64 @@ export const EventSchema = z
 
 export const EventsResponseSchema = z.strictObject({
   events: z.array(EventSchema).max(250),
+  omitted_count: z.number().int().min(0).max(250),
   next_cursor: CursorSchema.nullable(),
 });
+
+export const ChangesQuerySchema = z.strictObject({ cursor: CursorSchema.optional() });
+export const ChangesResponseSchema = z
+  .strictObject({
+    events: z.array(EventSchema).max(250),
+    omitted_count: z.number().int().min(0).max(250),
+    next_cursor: CursorSchema.nullable(),
+    sync_cursor: CursorSchema.nullable(),
+  })
+  .refine((value) => (value.next_cursor === null) !== (value.sync_cursor === null));
+
+const RecurrenceLinesSchema = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(2048)
+      .regex(/^(?:RRULE|EXDATE|RDATE)(?:;[^:\r\n]+)?:[^\r\n]+$/u),
+  )
+  .max(32)
+  .refine((value) => new TextEncoder().encode(JSON.stringify(value)).length <= 16384);
+const writeShape = {
+  title: eventTextSchema(1000),
+  description: eventTextSchema(16000),
+  location: eventTextSchema(1000),
+  start: EventBoundarySchema,
+  end: EventBoundarySchema,
+  transparency: z.enum(["opaque", "transparent"]),
+  recurrence: RecurrenceLinesSchema,
+};
+export const CreateEventRequestSchema = z
+  .strictObject({
+    ...writeShape,
+    title: writeShape.title.optional(),
+    description: writeShape.description.optional(),
+    location: writeShape.location.optional(),
+    transparency: writeShape.transparency.optional(),
+    recurrence: writeShape.recurrence.optional(),
+    idempotency_key: UuidSchema,
+  })
+  .refine((value) => boundaryPrecedes(value.start, value.end));
+export const PatchEventRequestSchema = z
+  .strictObject(writeShape)
+  .partial()
+  .refine((value) => Object.keys(value).length > 0)
+  .refine(
+    (value) =>
+      value.start === undefined ||
+      value.end === undefined ||
+      boundaryPrecedes(value.start, value.end),
+  );
+export type CreateEventRequest = z.infer<typeof CreateEventRequestSchema>;
+export type PatchEventRequest = z.infer<typeof PatchEventRequestSchema>;
+export type ChangesQuery = z.infer<typeof ChangesQuerySchema>;
+export type ChangesResponse = z.infer<typeof ChangesResponseSchema>;
 
 export const DeviceSchema = z.strictObject({
   id: DeviceSessionIdSchema,

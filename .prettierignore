@@ -2,3 +2,4 @@ coverage/
 dist/
 .wrangler/
 src/worker-configuration.d.ts
+.ops/

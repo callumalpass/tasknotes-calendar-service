@@ -1,4 +1,5 @@
-import { UuidSchema } from "../contracts/common";
+import { normalizeGoogleScopes } from "../auth/google-scopes";
+import { canonicalUuid } from "../contracts/common";
 import { encodeBase64Url } from "../crypto/base64url";
 import { randomBytes, type RandomByteSource } from "../crypto/random";
 import {
@@ -8,17 +9,19 @@ import {
   type TokenEnvelope,
   type TokenPayload,
 } from "../crypto/token-envelope";
-import { refreshGoogleToken, type GoogleProviderConfiguration } from "../provider/google";
+import {
+  refreshGoogleToken,
+  retryAfter,
+  type GoogleProviderConfiguration,
+} from "../provider/google";
 import type { ProviderError } from "../provider/types";
 import { tokenEnvelopeFromRow, tokenEnvelopeToRow } from "../storage/token-envelope-row";
 
-const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 const TOKEN_KIND = "calendar_oauth";
 const FRESHNESS_SKEW_SECONDS = 60;
 const LEASE_SECONDS = 120;
 const LOSER_DELAYS_MS = [50, 100, 200, 400, 800] as const;
 const RETRY_AFTER_SECONDS = 1;
-const MAX_RETRY_AFTER_SECONDS = 3_600;
 const ENVIRONMENTS = new Set(["local", "lab", "staging", "production"]);
 const textEncoder = new TextEncoder();
 
@@ -98,12 +101,6 @@ function failure(code: GoogleAccessTokenErrorCode, retryAfterSeconds?: number): 
   throw new GoogleAccessTokenError(code, retryAfterSeconds);
 }
 
-function canonicalUuid(value: unknown): string {
-  const result = UuidSchema.safeParse(value);
-  if (!result.success || result.data !== value) return failure("internal");
-  return result.data;
-}
-
 function positiveInteger(value: unknown): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) return failure("internal");
   return value as number;
@@ -155,8 +152,8 @@ function parseRow(value: unknown): ConnectionRow {
     return failure("internal");
   }
   const parsed: ConnectionRow = {
-    id: canonicalUuid(row["id"]),
-    principal_id: canonicalUuid(row["principal_id"]),
+    id: canonicalUuid(row["id"]) ?? failure("internal"),
+    principal_id: canonicalUuid(row["principal_id"]) ?? failure("internal"),
     status,
     generation: positiveInteger(row["generation"]),
     principal_generation: positiveInteger(row["principal_generation"]),
@@ -193,32 +190,12 @@ function envelope(row: ConnectionRow): TokenEnvelope {
   }
 }
 
-const SCOPE_ALIASES = new Map([
-  ["openid", "openid"],
-  ["email", "email"],
-  ["https://www.googleapis.com/auth/userinfo.email", "email"],
-  ["profile", "profile"],
-  ["https://www.googleapis.com/auth/userinfo.profile", "profile"],
-  [CALENDAR_SCOPE, CALENDAR_SCOPE],
-]);
-
 function normalizedScopes(scopes: readonly unknown[]): readonly string[] {
-  if (scopes.length === 0 || scopes.length > 100) return failure("internal");
-  const effective = new Set<string>();
-  for (const scope of scopes) {
-    if (typeof scope !== "string" || scope.length === 0 || textEncoder.encode(scope).length > 256)
-      return failure("internal");
-    const canonical = SCOPE_ALIASES.get(scope);
-    if (canonical === undefined) return failure("internal");
-    effective.add(canonical);
-  }
-  if (
-    effective.size !== 4 ||
-    !["openid", "email", "profile", CALENDAR_SCOPE].every((scope) => effective.has(scope))
-  ) {
+  try {
+    return Object.freeze([...normalizeGoogleScopes(scopes)].sort());
+  } catch {
     return failure("internal");
   }
-  return Object.freeze([...effective].sort());
 }
 
 function returnedScopes(value: string): readonly string[] {
@@ -249,13 +226,6 @@ function sameEnvelope(left: ConnectionRow, value: TokenEnvelope): boolean {
   );
 }
 
-function retryAfter(error: ProviderError): number | undefined {
-  const value = error.retryAfterSeconds;
-  return Number.isSafeInteger(value) && value !== undefined && value >= 0
-    ? Math.min(value, MAX_RETRY_AFTER_SECONDS)
-    : undefined;
-}
-
 export class GoogleAccessTokens {
   readonly #dependencies: GoogleAccessTokensDependencies;
   readonly #snapshots = new WeakMap<ConnectionSnapshot, SnapshotState>();
@@ -273,7 +243,7 @@ export class GoogleAccessTokens {
   }
 
   public async loadForPrincipal(principalId: string): Promise<ConnectionSnapshot | null> {
-    canonicalUuid(principalId);
+    if (canonicalUuid(principalId) === undefined) failure("internal");
     try {
       const value = await this.#dependencies.db
         .prepare(
@@ -343,10 +313,9 @@ export class GoogleAccessTokens {
   public async assertCurrent(grant: AccessGrant): Promise<void> {
     try {
       if (!this.#grants.has(grant)) return failure("internal");
-      canonicalUuid(grant.principalId);
-      canonicalUuid(grant.connectionId);
+      if (canonicalUuid(grant.principalId) === undefined) failure("internal");
+      if (canonicalUuid(grant.connectionId) === undefined) failure("internal");
       positiveInteger(grant.generation);
-      positiveInteger(grant.tokenVersion);
       positiveInteger(grant.principalGeneration);
       const exact = await this.#dependencies.db
         .prepare(
@@ -355,16 +324,10 @@ export class GoogleAccessTokens {
              AND principal.google_connection_generation = connection.generation
            WHERE connection.id = ? AND connection.principal_id = ?
              AND connection.provider = 'google' AND connection.status = 'active'
-             AND connection.generation = ? AND connection.token_version = ?
+             AND connection.generation = ?
              AND principal.google_connection_generation = ? LIMIT 1`,
         )
-        .bind(
-          grant.connectionId,
-          grant.principalId,
-          grant.generation,
-          grant.tokenVersion,
-          grant.principalGeneration,
-        )
+        .bind(grant.connectionId, grant.principalId, grant.generation, grant.principalGeneration)
         .first();
       if (exact !== null) return;
       await this.#failForCurrent(grant.principalId);
@@ -459,7 +422,8 @@ export class GoogleAccessTokens {
              refresh_lease_generation = generation, refresh_lease_token_version = token_version,
              updated_at = unixepoch()
            WHERE id = ? AND principal_id = ? AND provider = 'google' AND status = 'active'
-             AND generation = ? AND token_version = ? AND refresh_lease_owner IS NULL
+             AND generation = ? AND token_version = ?
+             AND (refresh_lease_owner IS NULL OR refresh_lease_until <= unixepoch())
              AND EXISTS (SELECT 1 FROM principals WHERE id = ?
                AND google_connection_generation = ?)
            RETURNING refresh_lease_owner, refresh_lease_until, unixepoch() AS database_now`,
@@ -523,10 +487,11 @@ export class GoogleAccessTokens {
         }
         if (current.token_version !== row.token_version) return failure("conflict");
         if (
-          current.refresh_lease_owner !== null &&
-          (current.refresh_lease_until ?? 0) <= current.database_now
+          (current.refresh_lease_owner === null ||
+            (current.refresh_lease_until ?? 0) <= current.database_now) &&
+          (await this.#acquire(current, owner))
         ) {
-          return this.#expireExactLease(row, current);
+          return this.#refreshAsOwner(current, payload, owner);
         }
         try {
           await this.#dependencies.sleep(delay);
@@ -543,10 +508,11 @@ export class GoogleAccessTokens {
       if (!sameAuthority(row, current) || current.status !== "active")
         return this.#failForRow(current);
       if (
-        current.refresh_lease_owner !== null &&
-        (current.refresh_lease_until ?? 0) <= current.database_now
+        (current.refresh_lease_owner === null ||
+          (current.refresh_lease_until ?? 0) <= current.database_now) &&
+        (await this.#acquire(current, owner))
       ) {
-        return this.#expireExactLease(row, current);
+        return this.#refreshAsOwner(current, payload, owner);
       }
       return failure("unavailable", RETRY_AFTER_SECONDS);
     }
@@ -555,52 +521,6 @@ export class GoogleAccessTokens {
 
   #failForRow(row: ConnectionRow): never {
     return failure(row.status === "reconnect_required" ? "reconnect" : "conflict");
-  }
-
-  async #expireExactLease(row: ConnectionRow, observed: ConnectionRow): Promise<never> {
-    if (
-      observed.refresh_lease_owner === null ||
-      observed.refresh_lease_until === null ||
-      observed.refresh_lease_until > observed.database_now
-    ) {
-      return failure("unavailable", RETRY_AFTER_SECONDS);
-    }
-    try {
-      await this.#dependencies.db
-        .prepare(
-          `UPDATE connections SET status = 'reconnect_required',
-             refresh_lease_owner = NULL, refresh_lease_until = NULL,
-             refresh_lease_generation = NULL, refresh_lease_token_version = NULL,
-             discovery_lease_owner = NULL, discovery_lease_until = NULL,
-             discovery_lease_generation = NULL, discovery_lease_token_version = NULL,
-             updated_at = unixepoch()
-           WHERE id = ? AND principal_id = ? AND provider = 'google' AND status = 'active'
-             AND generation = ? AND token_version = ? AND refresh_lease_owner = ?
-             AND refresh_lease_until = ? AND refresh_lease_until <= unixepoch()
-             AND refresh_lease_generation = ? AND refresh_lease_token_version = ?
-             AND EXISTS (SELECT 1 FROM principals WHERE id = ?
-               AND google_connection_generation = ?)`,
-        )
-        .bind(
-          row.id,
-          row.principal_id,
-          row.generation,
-          row.token_version,
-          observed.refresh_lease_owner,
-          observed.refresh_lease_until,
-          row.generation,
-          row.token_version,
-          row.principal_id,
-          row.principal_generation,
-        )
-        .run();
-    } catch {
-      // Resolve both a lost race and an ambiguous applied transition through current authority.
-    }
-    const current = await this.#current(row.principal_id);
-    if (current?.status === "reconnect_required" && sameAuthority(row, current))
-      return failure("reconnect");
-    return failure("unavailable", RETRY_AFTER_SECONDS);
   }
 
   async #refreshAsOwner(
@@ -621,6 +541,7 @@ export class GoogleAccessTokens {
           : { timeoutMs: this.#dependencies.providerTimeoutMs }),
       });
     } catch {
+      await this.#releaseLease(row, owner);
       return failure("unavailable");
     }
     if (!result.ok) return this.#providerFailure(row, owner, result.error);
@@ -632,6 +553,7 @@ export class GoogleAccessTokens {
       refreshed.expiresInSeconds > 86_400 ||
       (refreshed.refreshToken !== undefined && !boundedSecret(refreshed.refreshToken))
     ) {
+      await this.#releaseLease(row, owner);
       return failure("unavailable");
     }
     let scopes: readonly string[];
@@ -641,6 +563,7 @@ export class GoogleAccessTokens {
           ? normalizedScopes(payload.scopes)
           : returnedScopes(refreshed.scope);
     } catch {
+      await this.#releaseLease(row, owner);
       return failure("unavailable");
     }
     const committedAt = await this.#databaseNow();
@@ -670,6 +593,31 @@ export class GoogleAccessTokens {
       return failure("internal");
     }
     return this.#commit(row, owner, generated, nextPayload, committedAt);
+  }
+
+  async #releaseLease(row: ConnectionRow, owner: string): Promise<void> {
+    await this.#dependencies.db
+      .prepare(
+        `UPDATE connections SET refresh_lease_owner = NULL, refresh_lease_until = NULL,
+         refresh_lease_generation = NULL, refresh_lease_token_version = NULL,
+         updated_at = unixepoch()
+       WHERE id = ? AND principal_id = ? AND status = 'active'
+         AND generation = ? AND token_version = ? AND refresh_lease_owner = ?
+         AND refresh_lease_generation = ? AND refresh_lease_token_version = ?
+         AND EXISTS (SELECT 1 FROM principals WHERE id = ? AND google_connection_generation = ?)`,
+      )
+      .bind(
+        row.id,
+        row.principal_id,
+        row.generation,
+        row.token_version,
+        owner,
+        row.generation,
+        row.token_version,
+        row.principal_id,
+        row.principal_generation,
+      )
+      .run();
   }
 
   async #providerFailure(row: ConnectionRow, owner: string, error: ProviderError): Promise<never> {
@@ -710,6 +658,7 @@ export class GoogleAccessTokens {
         return failure("reconnect");
       return failure("conflict");
     }
+    await this.#releaseLease(row, owner);
     if (error.code === "rate_limited")
       return failure("rate_limited", retryAfter(error) ?? RETRY_AFTER_SECONDS);
     return failure("unavailable", retryAfter(error));

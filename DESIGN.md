@@ -16,38 +16,50 @@ surfaces, clear status language, no celebratory or promotional chrome.
 
 A client starts a short-lived, device-bound transaction and opens the system browser. Google returns
 to the service. The callback browser never receives a service credential. The initiating client
-proves possession of its verifier, confirms the identity when required, and receives a per-device
-service credential.
+proves possession of its verifier and, for sign-in, enters the one-time confirmation code shown only
+in that browser, then receives a per-device service credential. Starting a connect supersedes the
+person's abandoned attempt, so closing a browser never locks them out.
 
 The service identifies Google accounts by validated issuer and subject. Email may help the person
 recognize the account but never determines ownership or merging.
 
 ## Event representation
 
-The initial API overlays normalized external events in clients without writing them into TaskNotes
-records. Preserve provider IDs as opaque server-side mapping material. Normalize all-day and timed
-boundaries explicitly; preserve all-day end dates as exclusive, and do not silently invent timezone
-or recurrence semantics. Text is never silently truncated: provider byte bounds are enforced first,
-and values outside the public contract's character bounds fail the page mapping. Public event and
-series identifiers are stateless keyed derivations scoped to the environment and
-authorization-resolved calendar.
+Clients overlay normalized external events without the service writing them into TaskNotes records.
+Normalize all-day and timed boundaries explicitly; preserve all-day end dates as exclusive, and do
+not silently invent timezone or recurrence semantics. `dateTime` is the authoritative instant and
+`timeZone` is display metadata. Text is never silently truncated: an event outside the public
+contract's bounds is omitted from its page and counted in `omitted_count`, so one unusual event
+cannot fail a calendar. Public event and series identifiers are sealed, deterministic, and
+reversible only under the environment's key and the authorization-resolved calendar, and they convey
+no authority.
+
+## Provider writes
+
+Writes are authorized like reads, rechecked immediately before the provider call, and never stored.
+Creates carry a client `idempotency_key` that determines the Google event ID, so a retry cannot
+duplicate. Updates and deletes require `If-Match` with the event's `etag`. Attendee notifications
+stay off. A timed-out write has an unknown outcome: clients retry creates and re-read before
+repeating anything else.
 
 ## Provider-read authority
 
-Refresh attempts are serialized by a D1-clocked, non-stealable lease bound to the exact connection
-generation and token version. Because a refresh may rotate credentials before its response is lost,
-an abandoned attempt requires reconnection rather than repeating the provider side effect. Calendar
-discovery is an idempotent read and uses a separately bounded, stealable lease. Only one complete
-terminal Calendar List page may atomically replace mappings and advance its discovery version.
+Refresh attempts are serialized by a D1-clocked lease bound to the exact connection generation and
+token version. The lease is stealable after expiry and every provider failure releases it, so a
+crash or Google outage retries rather than forcing re-consent. If a rotated token was really lost,
+the retry receives `invalid_grant` and reaches `reconnect_required`. Calendar discovery uses a
+separately bounded, stealable lease. Only one complete terminal Calendar List page may atomically
+replace mappings and advance its discovery version.
 
 Event cursors are opened only after principal-scoped calendar authorization and before any token or
-provider operation. They authenticate the principal, connection generation, public calendar, exact
-range, and private provider page token. Provider results are released only after current connection
-authority is rechecked.
+provider operation. They authenticate the principal, connection generation, public calendar, read
+shape, and private provider page or sync token. Provider results are released only after current
+connection authority is rechecked.
 
 ## Data lifecycle
 
 Connection identity, encrypted tokens, device sessions, OAuth transactions, revocation generations,
 and opaque calendar mappings are durable security state. Event responses are live bounded provider
-reads. The initial architecture has no event mirror, event mapping table, or event cache;
-introducing any retained event content requires a later accepted ADR.
+reads. There is no event mirror, event mapping table, or event cache; introducing any retained event
+content requires a later accepted ADR. An hourly scheduled job deletes expired transactions, dead
+sessions, and deletion fences older than any transaction they could still affect.

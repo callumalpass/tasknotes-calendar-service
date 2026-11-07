@@ -23,6 +23,10 @@ export default defineConfig({
         configPath: "./wrangler.jsonc",
       },
       miniflare: {
+        ratelimits: {
+          API_RATE_LIMITER: { namespace_id: "1001", simple: { limit: 1_000_000, period: 60 } },
+          TEST_RATE_LIMITER: { namespace_id: "1003", simple: { limit: 1, period: 60 } },
+        },
         bindings: {
           TEST_MIGRATIONS: migrations,
           GOOGLE_CLIENT_SECRET: "test-only-fake-google-secret",

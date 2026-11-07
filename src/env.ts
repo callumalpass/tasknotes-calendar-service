@@ -1,15 +1,12 @@
-export interface Env {
-  DB: D1Database;
+type Bindings = {
+  [Binding in keyof Cloudflare.Env]: Cloudflare.Env[Binding] extends string
+    ? string
+    : Cloudflare.Env[Binding];
+};
+
+export interface Env extends Omit<Bindings, "ENVIRONMENT"> {
   ENVIRONMENT: "local" | "lab" | "staging" | "production";
-  PUBLIC_ORIGIN: string;
-  GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
-  GOOGLE_AUTHORIZATION_ENDPOINT: string;
-  GOOGLE_TOKEN_ENDPOINT: string;
-  GOOGLE_JWKS_URI: string;
-  GOOGLE_ISSUER: string;
-  GOOGLE_REVOCATION_ENDPOINT: string;
-  GOOGLE_CALENDAR_API_ORIGIN: string;
   OAUTH_TRANSACTION_KEK_V1: string;
   TOKEN_KEK_V1: string;
   SESSION_PEPPER: string;

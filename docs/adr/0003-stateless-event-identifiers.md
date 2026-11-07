@@ -1,6 +1,6 @@
 # ADR 0003: Stateless deterministic event identifiers
 
-- Status: Accepted
+- Status: Superseded by ADR 0005
 - Date: 2026-09-01
 
 ## Decision

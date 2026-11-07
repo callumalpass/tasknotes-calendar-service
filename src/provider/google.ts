@@ -1,3 +1,4 @@
+import { isRecord } from "../contracts/common";
 import type {
   ProviderAllDayBoundary,
   ProviderCalendar,
@@ -14,7 +15,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/u;
-const MAX_RESPONSE_BYTES = 1_048_576;
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_ERROR_BYTES = 16_384;
 const MAX_ITEMS = 250;
 const MAX_TOKEN_BYTES = 16_384;
@@ -27,7 +28,6 @@ const MAX_CALENDAR_NAME_CHARACTERS = 500;
 const MAX_CALENDAR_DESCRIPTION_CHARACTERS = 4_000;
 const MAX_CALENDAR_TIME_ZONE_CHARACTERS = 100;
 const PRINTABLE_PAGE_TOKEN_PATTERN = /^[\u0020-\u007e]+$/u;
-const MAX_LOCATION_BYTES = 8_192;
 const MAX_RETRY_AFTER_SECONDS = 3_600;
 const MAX_EVENT_RANGE_MS = 93 * 24 * 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -164,10 +164,6 @@ function boundedString(
   return encoder.encode(value).length <= maximumBytes ? value : undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function requestTimeout(options: GoogleRequestOptions): number {
   const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT_MS) {
@@ -263,7 +259,7 @@ function isCalendarUsageLimit(response: Response, bytes: Uint8Array | undefined)
   );
 }
 
-function retryAfter(response: Response): number | undefined {
+function responseRetryAfter(response: Response): number | undefined {
   const value = response.headers.get("retry-after")?.trim();
   if (!value) return undefined;
   let seconds: number;
@@ -278,6 +274,13 @@ function retryAfter(response: Response): number | undefined {
   return Math.min(seconds, MAX_RETRY_AFTER_SECONDS);
 }
 
+export function retryAfter(error: ProviderError): number | undefined {
+  const value = error.retryAfterSeconds;
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0
+    ? Math.min(value, MAX_RETRY_AFTER_SECONDS)
+    : undefined;
+}
+
 type HttpErrorPolicy = "calendar" | "token" | "default";
 
 function httpFailure(
@@ -287,19 +290,39 @@ function httpFailure(
 ): ProviderOutcome<never> {
   if (policy === "token" && response.status === 400 && isInvalidGrant(response, bytes))
     return failure("reauthorization_required", "Provider reauthorization is required.");
+  if (policy === "calendar" && response.status === 400)
+    return failure("invalid_request", "Provider rejected the request.");
+  if (policy === "calendar" && response.status === 409)
+    return failure("duplicate", "Provider resource already exists.");
+  if (policy === "calendar" && response.status === 412)
+    return failure("precondition", "Provider precondition failed.");
+  if (policy === "calendar" && response.status === 410)
+    return failure("gone", "Provider resource is gone.");
   if (response.status === 401) return failure("unauthorized", "Provider authorization failed.");
   if (policy === "calendar" && response.status === 403) {
     if (isCalendarUsageLimit(response, bytes))
-      return failure("rate_limited", "Provider rate limit was reached.", retryAfter(response));
+      return failure(
+        "rate_limited",
+        "Provider rate limit was reached.",
+        responseRetryAfter(response),
+      );
     return failure("permission_denied", "Provider permission was denied.");
   }
   if (policy === "calendar" && response.status === 404)
     return failure("not_found", "Provider resource was not found.");
   if (response.status === 403) return failure("unauthorized", "Provider authorization failed.");
   if (response.status === 429)
-    return failure("rate_limited", "Provider rate limit was reached.", retryAfter(response));
+    return failure(
+      "rate_limited",
+      "Provider rate limit was reached.",
+      responseRetryAfter(response),
+    );
   if (response.status >= 500)
-    return failure("unavailable", "Provider is temporarily unavailable.", retryAfter(response));
+    return failure(
+      "unavailable",
+      "Provider is temporarily unavailable.",
+      responseRetryAfter(response),
+    );
   return failure("invalid_response", "Provider rejected the request.");
 }
 
@@ -546,41 +569,25 @@ function validDateTime(value: string): boolean {
   return hour <= 23 && minute <= 59 && second <= 59 && Number.isFinite(Date.parse(value));
 }
 
-function zoneMatchesDateTime(dateTime: string, zone: string): boolean {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(dateTime));
-  const values = new Map(parts.map((part) => [part.type, part.value]));
-  const local = `${values.get("year")}-${values.get("month")}-${values.get("day")}T${values.get("hour")}:${values.get("minute")}:${values.get("second")}`;
-  return local === dateTime.slice(0, 19);
-}
-
 function boundary(value: unknown): ProviderEventBoundary | undefined {
   if (!isRecord(value)) return undefined;
   const date = value["date"];
   const dateTime = value["dateTime"];
   const zone = timeZone(value["timeZone"]);
-  if (zone === null) return undefined;
-  if (typeof date === "string" && dateTime === undefined && zone === undefined && validDate(date)) {
+
+  if (
+    typeof date === "string" &&
+    dateTime === undefined &&
+    (zone === undefined || zone === null) &&
+    validDate(date)
+  ) {
     return { kind: "all_day", date } satisfies ProviderAllDayBoundary;
   }
-  if (
-    date === undefined &&
-    typeof dateTime === "string" &&
-    validDateTime(dateTime) &&
-    (zone === undefined || zoneMatchesDateTime(dateTime, zone))
-  ) {
+  if (date === undefined && typeof dateTime === "string" && validDateTime(dateTime)) {
     return {
       kind: "timed",
       dateTime,
-      ...(zone === undefined ? {} : { timeZone: zone }),
+      ...(zone === undefined || zone === null ? {} : { timeZone: zone }),
     } satisfies ProviderTimedBoundary;
   }
   return undefined;
@@ -589,22 +596,25 @@ function boundary(value: unknown): ProviderEventBoundary | undefined {
 function boundaryBefore(left: ProviderEventBoundary, right: ProviderEventBoundary): boolean {
   if (left.kind !== right.kind) return false;
   return left.kind === "all_day"
-    ? left.date < (right as ProviderAllDayBoundary).date
-    : Date.parse(left.dateTime) < Date.parse((right as ProviderTimedBoundary).dateTime);
+    ? left.date <= (right as ProviderAllDayBoundary).date
+    : Date.parse(left.dateTime) <= Date.parse((right as ProviderTimedBoundary).dateTime);
 }
 
-function normalizeEvent(value: unknown): ProviderEvent | undefined {
+function normalizeEvent(value: unknown, allowIdOnly = false): ProviderEvent | undefined {
   if (!isRecord(value)) return undefined;
-  const id = boundedString(value["id"], MAX_ID_BYTES);
-  const status = value["status"];
+  const id = boundedString(value["id"], 1024);
+  const etag = boundedString(value["etag"], 256);
+  const status =
+    value["status"] ??
+    (allowIdOnly && Object.keys(value).every((key) => key === "id") ? "cancelled" : undefined);
   const updatedAt = boundedString(value["updated"], 64);
   const hasStart = Object.hasOwn(value, "start");
   const hasEnd = Object.hasOwn(value, "end");
   const start = hasStart ? boundary(value["start"]) : undefined;
   const end = hasEnd ? boundary(value["end"]) : undefined;
-  const title = optionalText(value["summary"], MAX_TITLE_BYTES, 1_000);
-  const description = optionalText(value["description"], MAX_DESCRIPTION_BYTES, 16_000);
-  const location = optionalText(value["location"], MAX_LOCATION_BYTES, 1_000);
+  const title = optionalText(value["summary"], 4_000, 1_000);
+  const description = optionalText(value["description"], 64_000, 16_000);
+  const location = optionalText(value["location"], 4_000, 1_000);
   const transparency =
     value["transparency"] === undefined || value["transparency"] === "opaque"
       ? "opaque"
@@ -614,7 +624,7 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
   const recurringEventId =
     value["recurringEventId"] === undefined
       ? undefined
-      : boundedString(value["recurringEventId"], MAX_ID_BYTES);
+      : boundedString(value["recurringEventId"], 1024);
   const originalStart =
     value["originalStartTime"] === undefined ? undefined : boundary(value["originalStartTime"]);
   const validBoundaries =
@@ -627,8 +637,9 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
         boundaryBefore(start, end);
   if (
     !id ||
-    !updatedAt ||
-    !validDateTime(updatedAt) ||
+    (status !== "cancelled" && (!updatedAt || !etag)) ||
+    (updatedAt !== undefined && !validDateTime(updatedAt)) ||
+    (value["etag"] !== undefined && (etag === undefined || !/^[\x21-\x7e]+$/u.test(etag))) ||
     (status !== "confirmed" && status !== "tentative" && status !== "cancelled") ||
     !validBoundaries ||
     title === null ||
@@ -643,7 +654,8 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
     return undefined;
   const common = {
     id,
-    updatedAt,
+    ...(updatedAt === undefined ? {} : { updatedAt }),
+    ...(etag === undefined ? {} : { etag }),
     transparency,
     ...(title === undefined ? {} : { title }),
     ...(description === undefined ? {} : { description }),
@@ -660,14 +672,16 @@ function normalizeEvent(value: unknown): ProviderEvent | undefined {
       ...(end === undefined ? {} : { end }),
     };
   }
-  if (start === undefined || end === undefined) return undefined;
-  return { ...common, status, start, end };
+  if (start === undefined || end === undefined || updatedAt === undefined || etag === undefined)
+    return undefined;
+  return { ...common, updatedAt, etag, status, start, end };
 }
 
 function normalizePage<T>(
   value: unknown,
   requestedPageToken: string | undefined,
   normalize: (item: unknown) => T | undefined,
+  omitInvalid = false,
 ): ProviderOutcome<ProviderPage<T>> {
   if (!isRecord(value) || !Array.isArray(value["items"]) || value["items"].length > MAX_ITEMS) {
     return failure("invalid_response", "Provider returned an invalid response.");
@@ -676,14 +690,30 @@ function normalizePage<T>(
   if (next === null || (requestedPageToken !== undefined && next === requestedPageToken)) {
     return failure("invalid_response", "Provider returned an invalid response.");
   }
+  const sync = pageToken(value["nextSyncToken"]);
+  if (sync === null || (sync !== undefined && next !== undefined))
+    return failure("invalid_response", "Provider returned an invalid response.");
+  let omittedCount = 0;
   const items: T[] = [];
   for (const item of value["items"]) {
     const normalized = normalize(item);
-    if (normalized === undefined)
-      return failure("invalid_response", "Provider returned an invalid response.");
+    if (normalized === undefined) {
+      if (!omitInvalid)
+        return failure("invalid_response", "Provider returned an invalid response.");
+      omittedCount += 1;
+      continue;
+    }
     items.push(normalized);
   }
-  return { ok: true, value: { items, ...(next === undefined ? {} : { nextPageToken: next }) } };
+  return {
+    ok: true,
+    value: {
+      items,
+      ...(omitInvalid ? { omittedCount } : {}),
+      ...(sync === undefined ? {} : { nextSyncToken: sync }),
+      ...(next === undefined ? {} : { nextPageToken: next }),
+    },
+  };
 }
 
 export async function listGoogleCalendarsPage(
@@ -734,14 +764,10 @@ export async function listGoogleEventsPage(
   );
   url.searchParams.set("maxResults", String(MAX_ITEMS));
   url.searchParams.set("singleEvents", "true");
-  url.searchParams.set("showDeleted", "true");
   url.searchParams.set("orderBy", "startTime");
   url.searchParams.set("timeMin", request.timeMin);
   url.searchParams.set("timeMax", request.timeMax);
-  url.searchParams.set(
-    "fields",
-    "nextPageToken,items(id,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
-  );
+  url.searchParams.set("fields", EVENTS_FIELDS);
   if (!addPageToken(url, request.pageToken))
     return failure("invalid_response", "Provider returned an invalid response.");
   let headers: Headers;
@@ -751,5 +777,93 @@ export async function listGoogleEventsPage(
     return invalidRequest();
   }
   const result = await jsonRequest(url, { method: "GET", headers }, request, "calendar");
-  return result.ok ? normalizePage(result.value, request.pageToken, normalizeEvent) : result;
+  return result.ok ? normalizePage(result.value, request.pageToken, normalizeEvent, true) : result;
+}
+
+const EVENT_FIELDS =
+  "id,etag,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone)";
+const EVENTS_FIELDS = `nextPageToken,items(${EVENT_FIELDS})`;
+
+export interface GoogleChangesListRequest extends GoogleRequestOptions {
+  readonly accessToken: string;
+  readonly calendarId: string;
+  readonly syncToken?: string;
+  readonly pageToken?: string;
+}
+
+export async function listGoogleChangesPage(
+  request: GoogleChangesListRequest,
+): Promise<ProviderOutcome<ProviderPage<ProviderEvent>>> {
+  const url = new URL(
+    `/calendar/v3/calendars/${encodeURIComponent(request.calendarId)}/events`,
+    configuration(request).calendarApiOrigin,
+  );
+  url.searchParams.set("maxResults", String(MAX_ITEMS));
+  url.searchParams.set("showDeleted", "true");
+  url.searchParams.set("singleEvents", "false");
+  url.searchParams.set("fields", `nextSyncToken,${EVENTS_FIELDS}`);
+  if (request.syncToken !== undefined) {
+    if (!validPageToken(request.syncToken)) return invalidRequest();
+    url.searchParams.set("syncToken", request.syncToken);
+  }
+  if (!addPageToken(url, request.pageToken)) return invalidRequest();
+  const result = await jsonRequest(
+    url,
+    { method: "GET", headers: bearer(request.accessToken) },
+    request,
+    "calendar",
+  );
+  if (!result.ok) return result;
+  const page = normalizePage(
+    result.value,
+    request.pageToken,
+    (item) => normalizeEvent(item, true),
+    true,
+  );
+  if (page.ok && page.value.nextPageToken === undefined && page.value.nextSyncToken === undefined)
+    return failure("invalid_response", "Provider returned an invalid response.");
+  return page;
+}
+
+export interface GoogleEventRequest extends GoogleRequestOptions {
+  readonly accessToken: string;
+  readonly calendarId: string;
+  readonly eventId: string;
+  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
+  readonly body?: Readonly<Record<string, unknown>>;
+  readonly ifMatch?: string;
+}
+
+export async function requestGoogleEvent(
+  request: GoogleEventRequest,
+): Promise<ProviderOutcome<ProviderEvent | undefined>> {
+  const path = `/calendar/v3/calendars/${encodeURIComponent(request.calendarId)}/events`;
+  const url = new URL(
+    request.method === "POST" ? path : `${path}/${encodeURIComponent(request.eventId)}`,
+    configuration(request).calendarApiOrigin,
+  );
+  if (request.method !== "DELETE") url.searchParams.set("fields", EVENT_FIELDS);
+  if (request.method !== "GET") url.searchParams.set("sendUpdates", "none");
+  const headers = bearer(request.accessToken);
+  if (request.ifMatch !== undefined) headers.set("If-Match", request.ifMatch);
+  if (request.body !== undefined) headers.set("content-type", "application/json");
+  return execute(
+    url,
+    {
+      method: request.method,
+      headers,
+      ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+    },
+    request,
+    async (response, signal) => {
+      if (request.method === "DELETE") {
+        await readBounded(response, MAX_ERROR_BYTES, signal);
+        return undefined;
+      }
+      const event = normalizeEvent(await parseJson(response, signal), request.method === "GET");
+      if (event === undefined) throw new TypeError("invalid provider event");
+      return event;
+    },
+    "calendar",
+  );
 }

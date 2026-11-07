@@ -1,4 +1,5 @@
 import { encodeBase64Url } from "../crypto/base64url";
+import { asArrayBuffer } from "../crypto/digest";
 
 const PROVIDER = "google";
 const ISSUER = "https://accounts.google.com";
@@ -33,10 +34,6 @@ export class IdentityDeletionInputError extends Error {
     super("identity deletion input is invalid");
     this.name = "IdentityDeletionInputError";
   }
-}
-
-function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(bytes).buffer;
 }
 
 function isBoundedValue(value: string, maximumBytes: number): boolean {

@@ -1,6 +1,8 @@
+import { CALENDAR_SCOPES, IDENTITY_SCOPES, normalizeGoogleScopes } from "./google-scopes";
 import { decodeProtectedHeader, jwtVerify } from "jose";
 import type { JWTVerifyGetKey, JWTPayload } from "jose";
 
+import { isRecord } from "../contracts/common";
 import { decodeBase64Url } from "../crypto/base64url";
 import { constantTimeEqual, sha256 } from "../crypto/digest";
 
@@ -10,22 +12,9 @@ const PRODUCTION_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/
 const PRODUCTION_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const CALLBACK_PATH = "/oauth/google/callback";
 const ACCEPTED_ISSUERS = new Set([CANONICAL_ISSUER, "accounts.google.com"]);
-const IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
-const IDENTITY_SCOPE_ALIASES = new Map([
-  ["openid", "openid"],
-  ["email", "email"],
-  ["https://www.googleapis.com/auth/userinfo.email", "email"],
-  ["profile", "profile"],
-  ["https://www.googleapis.com/auth/userinfo.profile", "profile"],
-]);
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 const OAUTH_VALUE = /^[\u0021-\u007e]+$/;
-const ALLOWED_CALENDAR_SCOPES = new Set([
-  "https://www.googleapis.com/auth/calendar.readonly",
-  "https://www.googleapis.com/auth/calendar.events.readonly",
-  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
-]);
 const MAX_PARAMETER_BYTES = 2_048;
 const MAX_TOKEN_BYTES = 16_384;
 const MAX_ID_TOKEN_BYTES = 32_768;
@@ -131,10 +120,6 @@ function fail(code: GoogleOidcErrorCode): never {
   throw new GoogleOidcError(code);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function assertBoundedAscii(value: string, maximumBytes = MAX_PARAMETER_BYTES): void {
   if (
     value.length === 0 ||
@@ -238,7 +223,7 @@ function validateCalendarScopes(scopes: readonly string[]): string[] {
   const unique = new Set<string>();
   for (const scope of scopes) {
     assertBoundedAscii(scope, 256);
-    if (!ALLOWED_CALENDAR_SCOPES.has(scope)) fail("invalid_request");
+    if (!CALENDAR_SCOPES.includes(scope)) fail("invalid_request");
     unique.add(scope);
   }
   if (unique.size !== scopes.length) fail("invalid_request");
@@ -269,6 +254,8 @@ function authorizationUrl(
   if (calendar) {
     url.searchParams.set("access_type", "offline");
     url.searchParams.set("prompt", "consent");
+  } else {
+    url.searchParams.set("prompt", "select_account");
   }
   return url;
 }
@@ -352,22 +339,11 @@ function validatedGrantedScopes(
   scopes: readonly string[],
   permittedCalendarScopes: readonly string[],
 ): string[] {
-  const permittedCalendar = new Set(permittedCalendarScopes);
-  const effective = new Set<string>();
-  for (const scope of scopes) {
-    const identityScope = IDENTITY_SCOPE_ALIASES.get(scope);
-    if (identityScope !== undefined) {
-      effective.add(identityScope);
-      continue;
-    }
-    if (!ALLOWED_CALENDAR_SCOPES.has(scope) || !permittedCalendar.has(scope)) {
-      fail("insufficient_scope");
-    }
-    effective.add(scope);
+  try {
+    return [...normalizeGoogleScopes(scopes, permittedCalendarScopes)];
+  } catch {
+    return fail("insufficient_scope");
   }
-  if (IDENTITY_SCOPES.some((scope) => !effective.has(scope))) fail("insufficient_scope");
-  if (permittedCalendarScopes.some((scope) => !effective.has(scope))) fail("insufficient_scope");
-  return [...effective];
 }
 
 function parseTokenResponse(value: unknown): TokenResponse {

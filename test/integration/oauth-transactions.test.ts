@@ -19,7 +19,8 @@ const PRINCIPAL = "00000000-0000-4000-8000-000000000001";
 const IDENTITY = "00000000-0000-4000-8000-000000000002";
 const VERIFIER = "tasknotes-client-verifier-value-that-is-long-enough-123";
 const KEYS = { activeVersion: 1, keys: new Map([[1, new Uint8Array(32).fill(81)]]) };
-const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+const CALENDAR_SCOPE =
+  "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly";
 
 class CountingRandom implements RandomByteSource {
   public calls = 0;
@@ -130,6 +131,11 @@ function state(response: { authorization_url: string }): string {
   return value;
 }
 
+function confirmation(result: { confirmationCode?: string }): string {
+  if (result.confirmationCode === undefined) throw new Error("Missing browser confirmation");
+  return result.confirmationCode;
+}
+
 beforeEach(async () => {
   await testEnv.DB.prepare("DELETE FROM oauth_transactions").run();
   await testEnv.DB.prepare("DELETE FROM principals").run();
@@ -154,7 +160,7 @@ beforeEach(async () => {
       accessToken: "access-token-private",
       refreshToken: "refresh-token-private",
       expiresInSeconds: 3600,
-      scopes: ["openid", "email", "profile", CALENDAR_SCOPE],
+      scopes: ["openid", "email", "profile", ...CALENDAR_SCOPE.split(" ")],
     },
   };
   identityDeletion = new IdentityDeletion({
@@ -222,7 +228,7 @@ describe("OAuth transactions against migrated D1", () => {
     const started = await startSignIn();
     const url = new URL(started.authorization_url);
     expect(url.searchParams.get("scope")).toBe("openid email profile");
-    expect(url.searchParams.has("prompt")).toBe(false);
+    expect(url.searchParams.get("prompt")).toBe("select_account");
     expect(url.searchParams.has("access_type")).toBe(false);
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
     expect(started.expires_at).toBe(new Date((NOW + 600) * 1000).toISOString());
@@ -284,9 +290,12 @@ describe("OAuth transactions against migrated D1", () => {
 
   it("creates a sign-in identity, updates metadata by immutable tuple, and redeems once", async () => {
     const started = await startSignIn();
-    await expect(
-      service.callback({ code: "provider-code-value", state: state(started) }),
-    ).resolves.toEqual({ status: "complete" });
+    const completed = await service.callback({
+      code: "provider-code-value",
+      state: state(started),
+    });
+    expect(completed.status).toBe("complete");
+    const confirmationCode = confirmation(completed);
     expect(exchangeSignInCalls).toBe(1);
     await expect(
       service.statusSignIn(started.transaction_id, started.polling_secret),
@@ -298,10 +307,18 @@ describe("OAuth transactions against migrated D1", () => {
       started.transaction_id,
       started.polling_secret,
       VERIFIER,
+      confirmationCode,
+      true,
     );
     expect(redeemed.session.credential).toMatch(/^v1\./u);
     await expect(
-      service.redeemSignIn(started.transaction_id, started.polling_secret, VERIFIER),
+      service.redeemSignIn(
+        started.transaction_id,
+        started.polling_secret,
+        VERIFIER,
+        confirmationCode,
+        true,
+      ),
     ).rejects.toMatchObject({ code: "conflict" });
     expect(
       JSON.stringify(await testEnv.DB.prepare("SELECT * FROM oauth_transactions").all()),
@@ -406,25 +423,43 @@ describe("OAuth transactions against migrated D1", () => {
 
   it("rejects the wrong TaskNotes verifier without consuming sign-in authority", async () => {
     const started = await startSignIn();
-    await service.callback({ code: "provider-code-value", state: state(started) });
+    const confirmationCode = confirmation(
+      await service.callback({ code: "provider-code-value", state: state(started) }),
+    );
     await expect(
       service.redeemSignIn(
         started.transaction_id,
         started.polling_secret,
         "wrong-tasknotes-verifier-value-that-is-long-enough-123",
+        confirmationCode,
+        true,
       ),
     ).rejects.toMatchObject({ code: "not_found" });
     await expect(
-      service.redeemSignIn(started.transaction_id, started.polling_secret, VERIFIER),
+      service.redeemSignIn(
+        started.transaction_id,
+        started.polling_secret,
+        VERIFIER,
+        confirmationCode,
+        true,
+      ),
     ).resolves.toHaveProperty("session.credential");
   });
 
   it("gives exactly one winner across 25 sign-in redemption attempts", async () => {
     const started = await startSignIn();
-    await service.callback({ code: "provider-code-value", state: state(started) });
+    const confirmationCode = confirmation(
+      await service.callback({ code: "provider-code-value", state: state(started) }),
+    );
     const attempts = await Promise.allSettled(
       Array.from({ length: 25 }, () =>
-        service.redeemSignIn(started.transaction_id, started.polling_secret, VERIFIER),
+        service.redeemSignIn(
+          started.transaction_id,
+          started.polling_secret,
+          VERIFIER,
+          confirmationCode,
+          true,
+        ),
       ),
     );
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
@@ -459,7 +494,8 @@ describe("OAuth transactions against migrated D1", () => {
     const started = await startSignIn();
     const callback = { code: "provider-code-value", state: state(started) } as const;
     const results = await Promise.all(Array.from({ length: 25 }, () => service.callback(callback)));
-    expect(results).toEqual(Array(25).fill({ status: "complete" }));
+    expect(results.filter((result) => result.status === "complete")).toHaveLength(1);
+    expect(results.filter((result) => result.confirmationCode !== undefined)).toHaveLength(1);
     expect(exchangeSignInCalls).toBe(1);
     await service.callback(callback);
     await service.callback({ code: "other-provider-code", state: "A".repeat(43) });
@@ -543,7 +579,36 @@ describe("OAuth transactions against migrated D1", () => {
     });
   });
 
-  it("starts new connect with offline readonly consent, stores an AAD-bound envelope, and redeems once", async () => {
+  it("supersedes an abandoned pending connect even thirty days later", async () => {
+    await insertPrincipal();
+    const abandoned = await startConnect();
+    currentTime += 30 * 24 * 60 * 60;
+    const replacement = await startConnect();
+    expect(replacement.transaction_id).not.toBe(abandoned.transaction_id);
+    await expect(
+      service.statusConnect(PRINCIPAL, abandoned.transaction_id, abandoned.polling_secret),
+    ).resolves.toEqual({ status: "expired" });
+  });
+
+  it("conflicts with a live exchange but supersedes it after its deadline", async () => {
+    await insertPrincipal();
+    const first = await startConnect();
+    onCalendarExchange = async () => {
+      await expect(startConnect()).rejects.toMatchObject({ code: "conflict" });
+      currentTime += 30;
+      await startConnect();
+      expect(
+        await testEnv.DB.prepare("SELECT status FROM oauth_transactions WHERE id = ?")
+          .bind(first.transaction_id)
+          .first("status"),
+      ).toBe("expired");
+    };
+    await service.callback({ code: "calendar-provider-code", state: state(first) });
+    expect(revoked).toEqual(["refresh-token-private"]);
+    expect(await testEnv.DB.prepare("SELECT COUNT(*) FROM connections").first("COUNT(*)")).toBe(0);
+  });
+
+  it("starts new connect with offline event and calendar-list consent, stores an AAD-bound envelope, and redeems once", async () => {
     await insertPrincipal();
     const started = await startConnect();
     const url = new URL(started.authorization_url);
@@ -696,11 +761,14 @@ describe("OAuth transactions against migrated D1", () => {
   it("enforces one active connect and revokes an exchanged refresh token when local authority loses", async () => {
     await insertPrincipal();
     const first = await startConnect();
-    await expect(startConnect()).rejects.toMatchObject({ code: "conflict" });
+    const replacement = await startConnect();
+    await expect(
+      service.statusConnect(PRINCIPAL, first.transaction_id, first.polling_secret),
+    ).resolves.toEqual({ status: "expired" });
     onCalendarExchange = async () => {
       await testEnv.DB.prepare("DELETE FROM principals WHERE id = ?").bind(PRINCIPAL).run();
     };
-    await service.callback({ code: "calendar-provider-code", state: state(first) });
+    await service.callback({ code: "calendar-provider-code", state: state(replacement) });
     expect(exchangeCalendarCalls).toBe(1);
     expect(revoked).toEqual(["refresh-token-private"]);
     await expect(
@@ -779,9 +847,9 @@ describe("OAuth transactions against migrated D1", () => {
     service = createService(testEnv.DB, { throwingClock: true });
     await expect(
       service.callback({ code: "provider-code-value", state: "A".repeat(43) }),
-    ).resolves.toEqual({ status: "complete" });
+    ).resolves.toEqual({ status: "failed" });
     await expect(service.callback({ code: "short", state: "not-base64url" })).resolves.toEqual({
-      status: "complete",
+      status: "failed",
     });
   });
 

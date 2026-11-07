@@ -12,6 +12,14 @@ import {
   GoogleAccessTokens,
 } from "../../src/connections/google-access-tokens";
 import { sealEventCursor, type EventCursorBinding } from "../../src/crypto/cursor";
+import { openSyncCursor, sealSyncCursor } from "../../src/crypto/cursor";
+import { sealEventId } from "../../src/crypto/event-id";
+import {
+  ChangesResponseSchema,
+  CreateEventRequestSchema,
+  PatchEventRequestSchema,
+} from "../../src/contracts";
+import type { FakeGoogleConfiguration, FakeGoogleStats } from "../support/fake-google";
 import { encryptTokenEnvelope, type TokenPayload } from "../../src/crypto/token-envelope";
 import type { EventsQuery } from "../../src/contracts";
 import type { Env } from "../../src/env";
@@ -32,7 +40,8 @@ const SCOPES = [
   "openid",
   "email",
   "profile",
-  "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
 ] as const;
 const RANGE: EventsQuery = {
   start: "2026-01-01T00:00:00Z",
@@ -43,6 +52,18 @@ const google = googleTestConfiguration({
   revocationEndpoint: "https://provider.test/revoke",
   calendarApiOrigin: "https://provider.test",
 });
+
+function clockDatabase(seconds: number): D1Database {
+  return new Proxy(testEnv.DB, {
+    get(target, property): unknown {
+      if (property === "prepare")
+        return (sql: string) =>
+          target.prepare(sql.replaceAll("unixepoch()", `(unixepoch() + ${seconds})`));
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? (value.bind(target) as unknown) : value;
+    },
+  });
+}
 
 function randomSource() {
   let next = 0;
@@ -169,9 +190,9 @@ async function insertCalendar(
   const current = await databaseNow();
   await testEnv.DB.prepare(
     `INSERT INTO calendars
-       (id, principal_id, connection_id, provider_calendar_id, name, description, color,
-        time_zone, access_role, is_primary, etag, discovered_at, updated_at)
-     VALUES (?, ?, ?, ?, 'Calendar', NULL, NULL, NULL, 'reader', 1, NULL, ?, ?)`,
+       (id, principal_id, connection_id, provider_calendar_id, name, description,
+        time_zone, access_role, is_primary, discovered_at, updated_at)
+     VALUES (?, ?, ?, ?, 'Calendar', NULL, NULL, 'reader', 1, ?, ?)`,
   )
     .bind(calendarId, principalId, connectionId, providerId, current, current)
     .run();
@@ -432,14 +453,16 @@ function tokenRowFaultDatabase(
   });
 }
 
-function calendarReadFaultDatabase(): D1Database {
+function calendarReadFaultDatabase(beforeRead?: () => Promise<void>): D1Database {
   const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
     new Proxy(statement, {
       get(target, property): unknown {
         if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values));
         if (property === "all") {
           return async () => {
+            await beforeRead?.();
             const result = await target.all();
+            if (beforeRead !== undefined) return result;
             return {
               ...result,
               results: result.results.map((row) => ({ ...row, is_primary: 2 })),
@@ -481,7 +504,561 @@ beforeEach(async () => {
   await testEnv.DB.prepare("DELETE FROM principals").run();
 });
 
+describe("stateless writes and incremental reads with fake Google and real D1", () => {
+  const fake = (env as unknown as { FAKE_GOOGLE: Fetcher }).FAKE_GOOGLE;
+  const binding = {
+    environment: "local",
+    provider: "google",
+    authorizationScopedCalendarId: CALENDAR,
+  } as const;
+  const create = {
+    idempotency_key: "88888888-8888-4888-8888-888888888888",
+    title: "Private write canary",
+    description: "Private description canary",
+    start: { kind: "date_time", date_time: "2026-11-06T09:00:00Z", time_zone: "America/New_York" },
+    end: { kind: "date_time", date_time: "2026-11-06T10:00:00Z" },
+  } as const;
+  const providerEvent = {
+    id: "provider-event-canary",
+    etag: '"1"',
+    status: "confirmed" as const,
+    updated: "2026-11-06T00:00:00Z",
+    start: { dateTime: "2026-11-06T09:00:00Z", timeZone: "America/New_York" },
+    end: { dateTime: "2026-11-06T10:00:00Z" },
+  };
+  const fetcher: typeof fetch = async (input, init) => {
+    const request = new Request(input, { ...init, redirect: "manual" });
+    request.headers.set("authorization", "Bearer fake-access");
+    const url = new URL(request.url);
+    return fake.fetch(new Request(`http://127.0.0.1:9797${url.pathname}${url.search}`, request));
+  };
+  async function configure(value: FakeGoogleConfiguration): Promise<void> {
+    const response = await fake.fetch("https://fake-google-control.test/configure", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(value),
+    });
+    expect(response.status).toBe(204);
+  }
+  async function stats(): Promise<FakeGoogleStats> {
+    return (await fake.fetch("https://fake-google-control.test/stats")).json();
+  }
+  async function setup(writable = true) {
+    await fake.fetch("https://fake-google-control.test/reset", { method: "POST" });
+    await seed({ calendar: true });
+    if (writable) await testEnv.DB.prepare("UPDATE calendars SET access_role = 'writer'").run();
+    await configure({
+      calendarEnabled: true,
+      eventPages: [{ calendarId: "private-provider-calendar", items: [providerEvent] }],
+    });
+    return service(state(), { fetch: fetcher });
+  }
+
+  it("creates idempotently, reads, patches conditionally, and deletes an already gone event", async () => {
+    const instance = await setup();
+    const first = await instance.event(PRINCIPAL, CALENDAR, "POST", undefined, create);
+    const replay = await instance.event(PRINCIPAL, CALENDAR, "POST", undefined, {
+      ...create,
+      title: "Must not replace original",
+    });
+    expect(replay).toEqual(first);
+    expect(first!.id).toMatch(/^e1_/u);
+    expect(first).toMatchObject({
+      title: create.title,
+      etag: '"1"',
+    });
+    expect(await instance.event(PRINCIPAL, CALENDAR, "GET", first!.id)).toEqual(first);
+    const patched = await instance.event(
+      PRINCIPAL,
+      CALENDAR,
+      "PATCH",
+      first!.id,
+      { title: "Changed" },
+      first!.etag!,
+    );
+    expect(patched).toMatchObject({ title: "Changed", etag: '"2"' });
+    await expectCode(
+      instance.event(PRINCIPAL, CALENDAR, "PATCH", first!.id, { title: "Stale" }, first!.etag!),
+      "conflict",
+    );
+    await instance.event(PRINCIPAL, CALENDAR, "DELETE", first!.id, undefined, patched!.etag!);
+    await expect(
+      instance.event(PRINCIPAL, CALENDAR, "DELETE", first!.id, undefined, patched!.etag!),
+    ).resolves.toBeUndefined();
+    await expectCode(instance.event(PRINCIPAL, CALENDAR, "POST", undefined, create), "conflict");
+    const persisted = JSON.stringify(await testEnv.DB.prepare("SELECT * FROM calendars").all());
+    expect(persisted).not.toContain(create.title);
+    expect(persisted).not.toContain("provider-event-canary");
+  });
+
+  it("switches boundary kinds on PATCH without leaving the previous kind's fields", async () => {
+    const instance = await setup();
+    const timed = await instance.event(PRINCIPAL, CALENDAR, "POST", undefined, create);
+    const allDay = await instance.event(
+      PRINCIPAL,
+      CALENDAR,
+      "PATCH",
+      timed!.id,
+      {
+        start: { kind: "date", date: "2026-11-06" },
+        end: { kind: "date", date: "2026-11-07" },
+      },
+      timed!.etag!,
+    );
+    expect(allDay!.start).toEqual({ kind: "date", date: "2026-11-06" });
+    const timedAgain = await instance.event(
+      PRINCIPAL,
+      CALENDAR,
+      "PATCH",
+      allDay!.id,
+      { start: create.start, end: create.end },
+      allDay!.etag!,
+    );
+    expect(timedAgain!.start).toEqual(create.start);
+  });
+
+  it("reports a provider 400 on a write as invalid input without failing reads the same way", async () => {
+    await seed({ calendar: true });
+    await testEnv.DB.prepare("UPDATE calendars SET access_role = 'writer'").run();
+    await expectCode(
+      service(state({ eventResponses: [json({ error: { code: 400 } }, 400)] })).event(
+        PRINCIPAL,
+        CALENDAR,
+        "POST",
+        undefined,
+        create,
+      ),
+      "invalid_request",
+    );
+    await expectCode(
+      service(state({ eventResponses: [json({ error: { code: 400 } }, 400)] })).listChanges(
+        PRINCIPAL,
+        CALENDAR,
+        {},
+      ),
+      "unavailable",
+    );
+  });
+
+  it("treats an id-only deleted event from GET as gone", async () => {
+    await seed({ calendar: true });
+    await testEnv.DB.prepare("UPDATE calendars SET access_role = 'writer'").run();
+    const id = await sealEventId(providerEvent.id, binding, EVENT_KEY);
+    await expectCode(
+      service(state({ eventResponses: [json({ id: providerEvent.id })] })).event(
+        PRINCIPAL,
+        CALENDAR,
+        "GET",
+        id,
+      ),
+      "not_found",
+    );
+    await expectCode(
+      service(
+        state({
+          eventResponses: [json({ error: { code: 409 } }, 409), json({ id: providerEvent.id })],
+        }),
+      ).event(PRINCIPAL, CALENDAR, "POST", undefined, create),
+      "conflict",
+    );
+  });
+
+  it("refreshes again when Google rejects a token that was just refreshed", async () => {
+    await seed({ calendar: true, expiresAt: (await databaseNow()) - 10 });
+    const provided = state({
+      eventResponses: [json({ error: { code: 401 } }, 401), json(providerEvent)],
+    });
+    const id = await sealEventId(providerEvent.id, binding, EVENT_KEY);
+    await expect(service(provided).event(PRINCIPAL, CALENDAR, "GET", id)).resolves.toMatchObject({
+      id,
+    });
+    expect(provided.refreshCalls).toBe(2);
+    expect(provided.eventCalls).toBe(2);
+  });
+
+  it("does not let a token refresh renew calendar discovery freshness", async () => {
+    await seed();
+    const item = { id: "discovered-calendar", summary: "Calendar", accessRole: "owner" };
+    const provided = state({
+      calendarResponses: [json({ items: [item] }), json({ items: [item] })],
+    });
+    await service(provided).listCalendars(PRINCIPAL);
+    const later = (await databaseNow()) + 3_600;
+    await testEnv.DB.prepare(
+      "UPDATE connections SET updated_at = ?1, last_provider_success_at = ?1",
+    )
+      .bind(later)
+      .run();
+    await service(provided, { db: clockDatabase(later) }).listCalendars(PRINCIPAL);
+    expect(provided.calendarCalls).toBe(2);
+  });
+
+  it("keeps cached calendars when a benign refresh lands during the read", async () => {
+    await seed();
+    const provided = state({
+      calendarResponses: [
+        json({ items: [{ id: "discovered-calendar", summary: "Calendar", accessRole: "owner" }] }),
+      ],
+    });
+    const instance = service(provided);
+    await instance.listCalendars(PRINCIPAL);
+    const tokens = accessTokens(testEnv.DB, provider(provided));
+    const db = calendarReadFaultDatabase(async () => {
+      await tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!, { forceRefresh: true });
+    });
+    const { calendars } = await service(provided, { db }).listCalendars(PRINCIPAL);
+    expect(calendars).toHaveLength(1);
+    expect(provided.calendarCalls).toBe(1);
+  });
+
+  it("rejects tenant and calendar substitution without token or provider calls", async () => {
+    const instance = await setup();
+    const id = await sealEventId(providerEvent.id, binding, EVENT_KEY);
+    await expectCode(instance.event(OTHER_PRINCIPAL, CALENDAR, "GET", id), "not_found");
+    await insertCalendar(OTHER_CALENDAR, "second-calendar");
+    await expectCode(instance.event(PRINCIPAL, OTHER_CALENDAR, "GET", id), "not_found");
+    const other = await sealEventId(
+      providerEvent.id,
+      { ...binding, authorizationScopedCalendarId: OTHER_CALENDAR },
+      EVENT_KEY,
+    );
+    await expectCode(
+      instance.event(PRINCIPAL, CALENDAR, "PATCH", other, { title: "Denied" }, '"1"'),
+      "not_found",
+    );
+    expect((await stats()).calendarCalls).toBe(0);
+    expect((await stats()).refreshRequests).toBe(0);
+  });
+
+  it("rejects a read-only calendar before token work", async () => {
+    const instance = await setup(false);
+    await expectCode(
+      instance.event(PRINCIPAL, CALENDAR, "POST", undefined, create),
+      "permission_denied",
+    );
+    expect((await stats()).calendarCalls).toBe(0);
+    expect((await stats()).refreshRequests).toBe(0);
+  });
+
+  it("disconnect before a write reaches Google prevents that call", async () => {
+    await setup();
+    const tokens = accessTokens(testEnv.DB, fetcher);
+    const original = tokens.assertCurrent.bind(tokens);
+    vi.spyOn(tokens, "assertCurrent").mockImplementationOnce(async (grant) => {
+      await testEnv.DB.prepare("DELETE FROM connections WHERE id = ?").bind(CONNECTION).run();
+      return original(grant);
+    });
+    const instance = service(state(), { fetch: fetcher, accessTokens: tokens });
+    await expectCode(instance.event(PRINCIPAL, CALENDAR, "POST", undefined, create), "not_found");
+    expect((await stats()).calendarCalls).toBe(0);
+  });
+
+  it("does not repeat timed-out writes", async () => {
+    await setup();
+    await configure({ calendar: "stall" });
+    const timed = service(state(), { fetch: fetcher, providerTimeoutMs: 20 });
+    await expectCode(timed.event(PRINCIPAL, CALENDAR, "POST", undefined, create), "unavailable");
+    expect((await stats()).eventCalls).toBe(1);
+  });
+
+  it.each(["range", "changes", "one"] as const)(
+    "discards %s results revoked while preparing the response",
+    async (operation) => {
+      await setup();
+      const tokens = accessTokens(testEnv.DB, fetcher);
+      const original = tokens.assertCurrent.bind(tokens);
+      let checks = 0;
+      vi.spyOn(tokens, "assertCurrent").mockImplementation(async (grant) => {
+        await original(grant);
+        checks += 1;
+        if (checks === 2)
+          await testEnv.DB.prepare("DELETE FROM connections WHERE id = ?").bind(CONNECTION).run();
+      });
+      const instance = service(state(), { fetch: fetcher, accessTokens: tokens });
+      const eventId = await sealEventId(providerEvent.id, binding, EVENT_KEY);
+      const result =
+        operation === "range"
+          ? instance.listEvents(PRINCIPAL, CALENDAR, RANGE)
+          : operation === "changes"
+            ? instance.listChanges(PRINCIPAL, CALENDAR, {})
+            : instance.event(PRINCIPAL, CALENDAR, "GET", eventId);
+      await expectCode(result, "not_found");
+      expect((await stats()).eventCalls).toBe(1);
+    },
+  );
+
+  it("refreshes once on an unapplied 401 and repeats no other provider failure", async () => {
+    await setup();
+    let refreshes = 0;
+    const refreshingFetch: typeof fetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/token") {
+        refreshes += 1;
+        return json({
+          access_token: "fake-access",
+          expires_in: 3600,
+          token_type: "Bearer",
+          scope: SCOPES.join(" "),
+        });
+      }
+      return fetcher(input, init);
+    };
+    const instance = service(state(), { fetch: refreshingFetch });
+    await configure({ calendar: "unauthorized" });
+    const event = await instance.event(PRINCIPAL, CALENDAR, "POST", undefined, create);
+    expect(event?.title).toBe(create.title);
+    expect(refreshes).toBe(1);
+    expect((await stats()).eventCalls).toBe(2);
+    await configure({ calendar: "server_error" });
+    await expectCode(
+      instance.event(PRINCIPAL, CALENDAR, "DELETE", event!.id, undefined, event!.etag!),
+      "unavailable",
+    );
+    expect((await stats()).eventCalls).toBe(3);
+    expect(refreshes).toBe(1);
+  });
+
+  it("rejects invalid merged intervals and recurrence changes to an instance before mutation", async () => {
+    const instance = await setup();
+    const id = await sealEventId(providerEvent.id, binding, EVENT_KEY);
+    await expectCode(
+      instance.event(
+        PRINCIPAL,
+        CALENDAR,
+        "PATCH",
+        id,
+        { end: { kind: "date_time", date_time: "2020-01-01T00:00:00Z" } },
+        '"1"',
+      ),
+      "invalid_request",
+    );
+    expect((await stats()).eventCalls).toBe(1);
+    await configure({
+      eventPages: [
+        {
+          calendarId: "private-provider-calendar",
+          items: [
+            {
+              ...providerEvent,
+              recurringEventId: "series",
+              originalStartTime: providerEvent.start,
+            },
+          ],
+        },
+      ],
+    });
+    await expectCode(
+      instance.event(PRINCIPAL, CALENDAR, "PATCH", id, { recurrence: ["RRULE:FREQ=DAILY"] }, '"1"'),
+      "invalid_request",
+    );
+    expect((await stats()).eventCalls).toBe(2);
+    expect((await instance.event(PRINCIPAL, CALENDAR, "GET", id))?.etag).toBe('"1"');
+  });
+
+  it("returns cross-zone and zero-duration events and counts malformed events", async () => {
+    const instance = await setup();
+    await configure({
+      eventPages: [
+        {
+          calendarId: "private-provider-calendar",
+          items: [
+            providerEvent,
+            { ...providerEvent, id: "zero", end: providerEvent.start },
+            {
+              ...providerEvent,
+              id: "unknown-zone",
+              start: { ...providerEvent.start, timeZone: "Unknown/Zone" },
+            },
+            { ...providerEvent, id: "invalid", end: { dateTime: "2020-01-01T00:00:00Z" } },
+            { ...providerEvent, id: "x".repeat(1025) },
+          ],
+        },
+      ],
+    });
+    const result = await instance.listEvents(PRINCIPAL, CALENDAR, {
+      start: "2026-11-01T00:00:00Z",
+      end: "2026-12-01T00:00:00Z",
+    });
+    expect(result.omitted_count).toBe(2);
+    expect(result.events).toHaveLength(3);
+    expect(result.events[0]?.start).toMatchObject({ time_zone: "America/New_York" });
+    expect(result.events[1]?.start).toEqual(result.events[1]?.end);
+    expect(result.events[2]?.start).not.toHaveProperty("time_zone");
+  });
+
+  it("accepts a complete page of 250 long events over the former one-MiB limit", async () => {
+    const instance = await setup();
+    await configure({
+      eventPages: [
+        {
+          calendarId: "private-provider-calendar",
+          items: Array.from({ length: 250 }, (_, index) => ({
+            ...providerEvent,
+            id: `event-${index}`,
+            description: "x".repeat(14000),
+          })),
+        },
+      ],
+    });
+    const result = await instance.listEvents(PRINCIPAL, CALENDAR, RANGE);
+    expect(result.events).toHaveLength(250);
+    expect(result.omitted_count).toBe(0);
+  });
+
+  it("pages an initial full sync without filters and returns an id-only tombstone", async () => {
+    const instance = await setup();
+    await configure({
+      eventPages: [
+        {
+          calendarId: "private-provider-calendar",
+          items: [providerEvent],
+          nextPageToken: "page-two",
+        },
+        { calendarId: "private-provider-calendar", items: [{ id: "gone" }] },
+      ],
+    });
+    const first = await instance.listChanges(PRINCIPAL, CALENDAR, {});
+    expect(first.next_cursor).not.toBeNull();
+    expect(first.sync_cursor).toBeNull();
+    const final = await instance.listChanges(PRINCIPAL, CALENDAR, { cursor: first.next_cursor! });
+    expect(ChangesResponseSchema.safeParse(final).success).toBe(true);
+    expect(final.events[0]).toMatchObject({
+      status: "cancelled",
+      start: null,
+      end: null,
+      updated_at: null,
+      etag: null,
+    });
+    expect(final.omitted_count).toBe(0);
+    expect(final.next_cursor).toBeNull();
+    const anotherWorker = service(state(), {
+      fetch: fetcher,
+      nowEpochSeconds: () => 9_000_000_000,
+    });
+    const incremental = await anotherWorker.listChanges(PRINCIPAL, CALENDAR, {
+      cursor: final.sync_cursor!,
+    });
+    expect(incremental.next_cursor).not.toBeNull();
+    const continued = await openSyncCursor(
+      incremental.next_cursor!,
+      {
+        principalId: PRINCIPAL,
+        connectionId: CONNECTION,
+        connectionGeneration: 1,
+        calendarId: CALENDAR,
+      },
+      CURSOR_KEY,
+    );
+    expect(continued).toEqual({ syncToken: "fake-sync-current", pageToken: "page-two" });
+    expect((await stats()).eventCalls).toBe(3);
+  });
+
+  it("maps an expired Google sync token to sync_reset_required", async () => {
+    const instance = await setup();
+    const cursor = await sealSyncCursor(
+      { syncToken: "expired" },
+      {
+        principalId: PRINCIPAL,
+        connectionId: CONNECTION,
+        connectionGeneration: 1,
+        calendarId: CALENDAR,
+      },
+      CURSOR_KEY,
+    );
+    await expectCode(instance.listChanges(PRINCIPAL, CALENDAR, { cursor }), "sync_reset_required");
+    expect((await stats()).eventCalls).toBe(1);
+  });
+
+  it("keeps page and sync cursors purpose-separated and binds sync authority", async () => {
+    const instance = await setup();
+    const cursor = await sealEventCursor(
+      "private",
+      {
+        principalId: PRINCIPAL,
+        connectionId: CONNECTION,
+        connectionGeneration: 1,
+        calendarId: CALENDAR,
+        rangeStart: RANGE.start,
+        rangeEnd: RANGE.end,
+      },
+      1800000000,
+      CURSOR_KEY,
+    );
+    await expectCode(instance.listChanges(PRINCIPAL, CALENDAR, { cursor }), "invalid_request");
+    const first = await instance.listChanges(PRINCIPAL, CALENDAR, {});
+    await expectCode(
+      instance.listEvents(PRINCIPAL, CALENDAR, { ...RANGE, cursor: first.sync_cursor! }),
+      "invalid_request",
+    );
+    for (const wrong of [
+      { principalId: OTHER_PRINCIPAL },
+      { connectionGeneration: 2 },
+      { calendarId: OTHER_CALENDAR },
+    ]) {
+      await expect(
+        openSyncCursor(
+          first.sync_cursor!,
+          {
+            principalId: PRINCIPAL,
+            connectionId: CONNECTION,
+            connectionGeneration: 1,
+            calendarId: CALENDAR,
+            ...wrong,
+          },
+          CURSOR_KEY,
+        ),
+      ).rejects.toThrow();
+    }
+    expect((await stats()).eventCalls).toBe(1);
+  });
+
+  it("bounds write schemas without adding plugin-only reminder or color fields", () => {
+    expect(CreateEventRequestSchema.safeParse(create).success).toBe(true);
+    expect(
+      CreateEventRequestSchema.safeParse({ ...create, reminders: { useDefault: true } }).success,
+    ).toBe(false);
+    expect(CreateEventRequestSchema.safeParse({ ...create, colorId: "1" }).success).toBe(false);
+    expect(PatchEventRequestSchema.safeParse({}).success).toBe(false);
+    expect(
+      PatchEventRequestSchema.safeParse({ recurrence: ["RRULE:FREQ=DAILY\nATTENDEE:unsafe"] })
+        .success,
+    ).toBe(false);
+    expect(
+      PatchEventRequestSchema.safeParse({
+        recurrence: ["RRULE:FREQ=DAILY", "EXDATE:20261106T090000Z", "RDATE:20261107T090000Z"],
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateEventRequestSchema.safeParse({ ...create, end: { kind: "date", date: "2026-11-07" } })
+        .success,
+    ).toBe(false);
+  });
+});
+
 describe("LiveGoogleCalendar with real D1", () => {
+  it("uses D1 discovery freshness without token work, provider calls, or D1 writes", async () => {
+    await seed();
+    const providerState = state({
+      calendarResponses: [
+        json({ items: [{ id: "calendar", summary: "Calendar", accessRole: "writer" }] }),
+      ],
+    });
+    const first = await service(providerState).listCalendars(PRINCIPAL);
+    const before = await testEnv.DB.prepare("SELECT * FROM connections").first();
+    const tokens = accessTokens(testEnv.DB, provider(providerState));
+    const access = vi.spyOn(tokens, "access");
+    const load = vi.spyOn(tokens, "loadForPrincipal");
+    const second = await service(providerState, {
+      accessTokens: tokens,
+      nowEpochSeconds: () => 1,
+    }).listCalendars(PRINCIPAL);
+    expect(second).toEqual(first);
+    expect(second.calendars[0]?.can_write).toBe(true);
+    expect(providerState.calendarCalls).toBe(1);
+    expect(access).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+    expect(await testEnv.DB.prepare("SELECT * FROM connections").first()).toEqual(before);
+  });
   it("serializes 20 service instances, keeps stable IDs, uses D1 time, and authoritatively deletes", async () => {
     await seed();
     const firstPage = {
@@ -533,7 +1110,7 @@ describe("LiveGoogleCalendar with real D1", () => {
 
     delete providerState.blockCalendar;
     providerState.calendarResponses.push(json({ items: [] }));
-    const skewed = service(providerState, { nowEpochSeconds: () => 1 });
+    const skewed = service(providerState, { db: clockDatabase(301), nowEpochSeconds: () => 1 });
     await expect(skewed.listCalendars(PRINCIPAL)).resolves.toEqual({ calendars: [] });
     expect(await testEnv.DB.prepare("SELECT 1 FROM calendars").first()).toBeNull();
   });
@@ -546,13 +1123,14 @@ describe("LiveGoogleCalendar with real D1", () => {
       accessRole: "reader",
     }));
     const providerState = state({ calendarResponses: [json({ items })] });
-    const instance = service(providerState);
+    let instance = service(providerState);
     const terminal = await instance.listCalendars(PRINCIPAL);
     expect(terminal.calendars).toHaveLength(250);
     expect(terminal.calendars[0]?.name).toBe("Calendar 000");
     expect(await testEnv.DB.prepare("SELECT COUNT(*) AS count FROM calendars").first()).toEqual({
       count: 250,
     });
+    instance = service(providerState, { db: clockDatabase(301) });
     providerState.calendarResponses.push(
       json({ items: [items[0]], nextPageToken: "more-calendars" }),
     );
@@ -713,6 +1291,41 @@ describe("LiveGoogleCalendar with real D1", () => {
     expect(providerState.eventCalls).toBe(0);
   });
 
+  it("does not conflict when refresh wins between a grant and discovery authority lookup", async () => {
+    await seed();
+    const providerState = state();
+    const tokens = accessTokens(testEnv.DB, provider(providerState));
+    const access = tokens.access.bind(tokens);
+    vi.spyOn(tokens, "access").mockImplementation(async (...args) => {
+      const grant = await access(...args);
+      await access((await tokens.loadForPrincipal(PRINCIPAL))!, { forceRefresh: true });
+      return grant;
+    });
+    await expect(
+      service(providerState, { accessTokens: tokens }).listCalendars(PRINCIPAL),
+    ).resolves.toHaveProperty("calendars");
+    expect(providerState.refreshCalls).toBe(1);
+  });
+
+  it("releases event results after a benign refresh during the provider read", async () => {
+    await seed({ calendar: true });
+    const providerState = state();
+    const tokens = accessTokens(testEnv.DB, provider(providerState));
+    const fetcher: typeof fetch = async (input, init) => {
+      const response = await provider(providerState)(input, init);
+      await tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!, { forceRefresh: true });
+      return response;
+    };
+    await expect(
+      service(providerState, { accessTokens: tokens, fetch: fetcher }).listEvents(
+        PRINCIPAL,
+        CALENDAR,
+        RANGE,
+      ),
+    ).resolves.toHaveProperty("events");
+    expect(providerState.refreshCalls).toBe(1);
+  });
+
   it("maps live event pages, refreshes exactly once after Calendar 401, and preserves tombstones", async () => {
     await seed({ calendar: true });
     const providerState = state({
@@ -724,6 +1337,7 @@ describe("LiveGoogleCalendar with real D1", () => {
             {
               id: "timed-private",
               status: "confirmed",
+              etag: '"1"',
               updated: "2026-01-01T00:00:00Z",
               summary: "Timed",
               start: { dateTime: "2026-01-02T10:00:00Z" },
@@ -732,6 +1346,7 @@ describe("LiveGoogleCalendar with real D1", () => {
             {
               id: "all-day-private",
               status: "tentative",
+              etag: '"1"',
               updated: "2026-01-01T00:00:00Z",
               start: { date: "2026-01-03" },
               end: { date: "2026-01-04" },
@@ -743,6 +1358,7 @@ describe("LiveGoogleCalendar with real D1", () => {
             {
               id: "tombstone-private",
               status: "cancelled",
+              etag: '"1"',
               updated: "2026-01-01T00:00:00Z",
               recurringEventId: "series-private",
               originalStartTime: { dateTime: "2026-01-05T10:00:00Z" },
@@ -1047,7 +1663,7 @@ describe("LiveGoogleCalendar with real D1", () => {
     const eventSuccess = state({ eventResponses: [json({ items: [] })] });
     await expect(
       service(eventSuccess, { providerTimeoutMs: 0 }).listEvents(PRINCIPAL, CALENDAR, RANGE),
-    ).resolves.toEqual({ events: [], next_cursor: null });
+    ).resolves.toEqual({ events: [], next_cursor: null, omitted_count: 0 });
   });
 
   it("rejects malformed calendar metadata and malformed event intervals atomically", async () => {
@@ -1066,6 +1682,7 @@ describe("LiveGoogleCalendar with real D1", () => {
             {
               id: "event",
               status: "confirmed",
+              etag: '"1"',
               updated: "2026-01-01T00:00:00Z",
               start: { date: "2026-01-02" },
               end: { date: "2026-01-01" },
@@ -1074,7 +1691,11 @@ describe("LiveGoogleCalendar with real D1", () => {
         }),
       ],
     });
-    await expectCode(service(malformedEvent).listEvents(PRINCIPAL, CALENDAR, RANGE), "unavailable");
+    await expect(service(malformedEvent).listEvents(PRINCIPAL, CALENDAR, RANGE)).resolves.toEqual({
+      events: [],
+      next_cursor: null,
+      omitted_count: 1,
+    });
   });
 
   it("contains a losing discovery sleep failure without crossing the provider boundary", async () => {
@@ -1130,6 +1751,7 @@ describe("LiveGoogleCalendar with real D1", () => {
     let accesses = 0;
     const changedGrant = {
       loadForPrincipal: async () => snapshot,
+      assertCurrent: async () => undefined,
       access: async () =>
         ++accesses === 1 ? grant : { ...grant, generation: 2, accessToken: "changed" },
     } as unknown as GoogleAccessTokens;

@@ -31,7 +31,8 @@ const SCOPES = [
   "openid",
   "https://www.googleapis.com/auth/userinfo.email",
   "profile",
-  "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
 ] as const;
 const keyring = { activeVersion: 1, keys: new Map([[1, new Uint8Array(32).fill(2)]]) };
 
@@ -239,7 +240,7 @@ describe("GoogleAccessTokens with real D1", () => {
   it.each([-60, 60])(
     "uses D1 freshness with an isolate clock skew of %s seconds",
     async (isolateSkew) => {
-      await seed(payload(databaseNow + 61));
+      await seed(payload(databaseNow + 90));
       vi.spyOn(Date, "now").mockReturnValue((databaseNow + isolateSkew) * 1_000);
       const refresh = vi.fn();
       const tokens = service({ refreshGoogleToken: refresh });
@@ -377,7 +378,7 @@ describe("GoogleAccessTokens with real D1", () => {
       await testEnv.DB.prepare("SELECT refresh_lease_owner FROM connections").first(
         "refresh_lease_owner",
       ),
-    ).toEqual(expect.any(String));
+    ).toBeNull();
   });
 
   it("marks exact invalid_grant reconnect and returns only a generic error", async () => {
@@ -401,7 +402,7 @@ describe("GoogleAccessTokens with real D1", () => {
     [{ code: "network", message: "secret" }, "unavailable", undefined],
     [{ code: "invalid_response", message: "secret" }, "unavailable", undefined],
   ] as const)(
-    "maps provider failure without details and retains its one-attempt lease",
+    "maps provider failure without details and releases its lease",
     async (error, code, retry) => {
       await seed(payload(NOW));
       const tokens = service({ refreshGoogleToken: async () => ({ ok: false, error }) });
@@ -411,11 +412,11 @@ describe("GoogleAccessTokens with real D1", () => {
         await testEnv.DB.prepare("SELECT refresh_lease_owner FROM connections").first(
           "refresh_lease_owner",
         ),
-      ).toEqual(expect.any(String));
+      ).toBeNull();
     },
   );
 
-  it("rejects disconnect, token-version races, clones, and forgeries in assertCurrent", async () => {
+  it("accepts benign token refresh but rejects disconnect, clones, and forgeries in assertCurrent", async () => {
     await seed(payload(databaseNow + 1_000));
     const tokens = service();
     const grant = await tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!);
@@ -427,11 +428,13 @@ describe("GoogleAccessTokens with real D1", () => {
       }),
       "internal",
     );
+    await tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!, { forceRefresh: true });
+    await expect(tokens.assertCurrent(grant)).resolves.toBeUndefined();
     await testEnv.DB.prepare("DELETE FROM connections WHERE id = ?").bind(CONNECTION).run();
     await expectCode(tokens.assertCurrent(grant), "conflict");
   });
 
-  it("reconnects an expired blocked provider attempt without a second provider call", async () => {
+  it("steals an expired blocked lease and fences its old owner", async () => {
     await seed(payload(databaseNow));
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => {
@@ -443,7 +446,7 @@ describe("GoogleAccessTokens with real D1", () => {
     });
     const refresh = vi.fn(async () => {
       entered();
-      await blocked;
+      if (refresh.mock.calls.length === 1) await blocked;
       return {
         ok: true as const,
         value: { accessToken: "late-access", expiresInSeconds: 500 },
@@ -454,20 +457,26 @@ describe("GoogleAccessTokens with real D1", () => {
     await started;
 
     // Fault-inject the passage of the full lease while the provider request remains blocked.
+    const trigger = await testEnv.DB.prepare(
+      "SELECT sql FROM sqlite_master WHERE name = 'connections_validate_update'",
+    ).first<string>("sql");
     await testEnv.DB.prepare("DROP TRIGGER connections_validate_update").run();
     await testEnv.DB.prepare(
       "UPDATE connections SET refresh_lease_until = unixepoch() - 1 WHERE id = ?",
     )
       .bind(CONNECTION)
       .run();
+    await testEnv.DB.prepare(trigger!).run();
     const contender = service({
       refreshGoogleToken: refresh,
       random: { bytes: (length) => new Uint8Array(length).fill(99) },
     });
-    await expectCode(contender.access((await contender.loadForPrincipal(PRINCIPAL))!), "reconnect");
-    expect(refresh).toHaveBeenCalledTimes(1);
+    await expect(
+      contender.access((await contender.loadForPrincipal(PRINCIPAL))!),
+    ).resolves.toMatchObject({ tokenVersion: 2 });
+    expect(refresh).toHaveBeenCalledTimes(2);
     release();
-    await expectCode(ownerOperation, "reconnect");
+    await expect(ownerOperation).resolves.toMatchObject({ tokenVersion: 2 });
     await expect(
       testEnv.DB.prepare(
         `SELECT status, refresh_lease_owner, discovery_lease_owner FROM connections WHERE id = ?`,
@@ -475,7 +484,7 @@ describe("GoogleAccessTokens with real D1", () => {
         .bind(CONNECTION)
         .first(),
     ).resolves.toEqual({
-      status: "reconnect_required",
+      status: "active",
       refresh_lease_owner: null,
       discovery_lease_owner: null,
     });
@@ -492,7 +501,7 @@ describe("GoogleAccessTokens with real D1", () => {
       .run();
     const refresh = vi.fn();
     const tokens = service({ db: databaseWithAcquireFault(), refreshGoogleToken: refresh });
-    await expectCode(tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!), "reconnect");
+    await expectCode(tokens.access((await tokens.loadForPrincipal(PRINCIPAL))!), "unavailable");
     expect(refresh).not.toHaveBeenCalled();
   });
 

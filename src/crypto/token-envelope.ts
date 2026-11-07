@@ -1,3 +1,5 @@
+import { hasExactKeys, isRecord } from "../contracts/common";
+import { aesDecrypt, aesEncrypt, importAesKey } from "./aes-gcm";
 import { decodeBase64Url, encodeBase64Url } from "./base64url";
 import { randomBytes, webCryptoRandom } from "./random";
 import type { RandomByteSource } from "./random";
@@ -51,19 +53,6 @@ export class TokenEnvelopeError extends Error {
     super("token envelope is invalid or cannot be authenticated");
     this.name = "TokenEnvelopeError";
   }
-}
-
-function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(bytes).buffer;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
 function assertBoundedString(
@@ -193,16 +182,6 @@ function associatedData(
   return textEncoder.encode(JSON.stringify(purpose === "dek" ? { ...common, keyVersion } : common));
 }
 
-async function importAesKey(rawKey: Uint8Array): Promise<CryptoKey> {
-  if (rawKey.length !== AES_KEY_BYTES) {
-    throw new TypeError("AES-256 key must be exactly 32 bytes");
-  }
-  return crypto.subtle.importKey("raw", asArrayBuffer(rawKey), { name: "AES-GCM" }, false, [
-    "encrypt",
-    "decrypt",
-  ]);
-}
-
 function getKek(keyring: KeyEncryptionKeyring, version: number): Uint8Array {
   validateVersion(version);
   const key = keyring.keys.get(version);
@@ -210,46 +189,6 @@ function getKek(keyring: KeyEncryptionKeyring, version: number): Uint8Array {
     throw new TypeError("key version is unavailable");
   }
   return key;
-}
-
-async function aesEncrypt(
-  key: CryptoKey,
-  plaintext: Uint8Array,
-  iv: Uint8Array,
-  aad: Uint8Array,
-): Promise<Uint8Array> {
-  return new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: "AES-GCM",
-        iv: asArrayBuffer(iv),
-        additionalData: asArrayBuffer(aad),
-        tagLength: 128,
-      },
-      key,
-      asArrayBuffer(plaintext),
-    ),
-  );
-}
-
-async function aesDecrypt(
-  key: CryptoKey,
-  ciphertext: Uint8Array,
-  iv: Uint8Array,
-  aad: Uint8Array,
-): Promise<Uint8Array> {
-  return new Uint8Array(
-    await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: asArrayBuffer(iv),
-        additionalData: asArrayBuffer(aad),
-        tagLength: 128,
-      },
-      key,
-      asArrayBuffer(ciphertext),
-    ),
-  );
 }
 
 async function unwrapDek(

@@ -1,13 +1,8 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import {
-  DeviceSessionInputError,
-  DeviceSessionLimitError,
-  DeviceSessions,
-  PrincipalUnavailableError,
-} from "../../src/auth/device-sessions";
-import type { Clock, DeviceClientKind } from "../../src/auth/device-sessions";
+import { DeviceSessionInputError, DeviceSessions } from "../../src/auth/device-sessions";
+import type { Clock, CreatedDeviceSession, DeviceClientKind } from "../../src/auth/device-sessions";
 import type { RandomByteSource } from "../../src/crypto/random";
 import type { Env } from "../../src/env";
 
@@ -73,7 +68,13 @@ async function addAuthorizedSignIn(
   id: string,
   principalId: string,
   identityId: string,
-  overrides: { pollingDigest?: string; challenge?: string; expiresAt?: number } = {},
+  overrides: {
+    pollingDigest?: string;
+    challenge?: string;
+    expiresAt?: number;
+    deviceName?: string;
+    clientKind?: DeviceClientKind;
+  } = {},
 ): Promise<void> {
   const now = START / 1_000;
   const expiresAt = overrides.expiresAt ?? now + 600;
@@ -83,9 +84,9 @@ async function addAuthorizedSignIn(
       (id, intent, status, state_hash, nonce_hash, polling_secret_hash,
        tasknotes_pkce_challenge, authorized_principal_id, authorized_identity_id,
        exchange_started_at, exchange_deadline_at, device_name, client_kind,
-       created_at, expires_at, callback_completed_at)
+       created_at, expires_at, callback_completed_at, confirmation_code_hash)
      VALUES (?, 'sign_in', 'authorized', ?, ?, ?, ?, ?, ?, ?, ?,
-             'Redeemed browser', 'web', ?, ?, ?)`,
+             ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -97,11 +98,41 @@ async function addAuthorizedSignIn(
       identityId,
       now - 5,
       completedAt,
+      overrides.deviceName ?? "Redeemed browser",
+      overrides.clientKind ?? "web",
       now - 10,
       expiresAt,
       completedAt,
+      "C".repeat(43),
     )
     .run();
+}
+
+async function createSession(input: {
+  principalId: string;
+  deviceName: string;
+  clientKind: DeviceClientKind;
+}): Promise<CreatedDeviceSession> {
+  let identityId = await testEnv.DB.prepare(
+    "SELECT id FROM external_identities WHERE principal_id = ?",
+  )
+    .bind(input.principalId)
+    .first<string>("id");
+  if (identityId === null) {
+    identityId = crypto.randomUUID();
+    await addGoogleIdentity(identityId, input.principalId, identityId);
+  }
+  const transactionId = crypto.randomUUID();
+  await addAuthorizedSignIn(transactionId, input.principalId, identityId, input);
+  const redeemed = await sessions.redeemSignInTransaction({
+    transactionId,
+    expectedPollingDigest: `poll-${transactionId}`,
+    expectedTasknotesPkceChallenge: `challenge-${transactionId}`,
+    expectedConfirmationDigest: "C".repeat(43),
+    webOriginAllowed: true,
+  });
+  if (redeemed === null) throw new Error("expected redeemed fixture session");
+  return redeemed;
 }
 
 async function addAuthorizedConnect(
@@ -181,22 +212,26 @@ beforeEach(async () => {
 });
 
 describe("device sessions against migrated D1", () => {
-  it("transactionally caps a principal at 100 active sessions under 101 concurrent creates", async () => {
+  it("transactionally caps a principal at 100 active sessions under 101 concurrent redemptions", async () => {
     await addPrincipal("principal-limit");
-    const outcomes = await Promise.allSettled(
-      Array.from({ length: 101 }, (_, index) =>
-        sessions.create({
-          principalId: "principal-limit",
-          deviceName: `Device ${index + 1}`,
-          clientKind: "web",
+    await addGoogleIdentity("identity-limit", "principal-limit", "subject-limit");
+    const transactionIds = Array.from({ length: 101 }, (_, index) => `transaction-limit-${index}`);
+    for (const transactionId of transactionIds) {
+      await addAuthorizedSignIn(transactionId, "principal-limit", "identity-limit");
+    }
+    const outcomes = await Promise.all(
+      transactionIds.map((transactionId) =>
+        sessions.redeemSignInTransaction({
+          transactionId,
+          expectedPollingDigest: `poll-${transactionId}`,
+          expectedTasknotesPkceChallenge: `challenge-${transactionId}`,
+          expectedConfirmationDigest: "C".repeat(43),
+          webOriginAllowed: true,
         }),
       ),
     );
-    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(100);
-    const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
-    expect(rejected).toHaveLength(1);
-    const failure = rejected[0];
-    expect(failure?.reason).toBeInstanceOf(DeviceSessionLimitError);
+    expect(outcomes.filter((outcome) => outcome !== null)).toHaveLength(100);
+    expect(outcomes.filter((outcome) => outcome === null)).toHaveLength(1);
     expect(
       await testEnv.DB.prepare(
         "SELECT COUNT(*) AS count FROM device_sessions WHERE principal_id = ? AND revoked_at IS NULL",
@@ -215,7 +250,7 @@ describe("device sessions against migrated D1", () => {
       "subject-redemption-limit",
     );
     for (let index = 0; index < 100; index += 1) {
-      await sessions.create({
+      await createSession({
         principalId: "principal-redemption-limit",
         deviceName: `Existing ${index + 1}`,
         clientKind: "web",
@@ -231,6 +266,8 @@ describe("device sessions against migrated D1", () => {
         transactionId: "transaction-redemption-limit",
         expectedPollingDigest: "poll-transaction-redemption-limit",
         expectedTasknotesPkceChallenge: "challenge-transaction-redemption-limit",
+        expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
     await expect(
@@ -243,7 +280,7 @@ describe("device sessions against migrated D1", () => {
   it("returns a 256-bit opaque secret once and persists only a keyed digest", async () => {
     await addPrincipal("principal-a");
 
-    const created = await sessions.create({
+    const created = await createSession({
       principalId: "principal-a",
       deviceName: "Callum's phone",
       clientKind: "android",
@@ -274,17 +311,64 @@ describe("device sessions against migrated D1", () => {
     });
   });
 
+  it("authenticates concurrent hourly usage updates and advances principal activity", async () => {
+    await addPrincipal("principal-a");
+    const created = await createSession({
+      principalId: "principal-a",
+      deviceName: "Browser",
+      clientKind: "web",
+    });
+    clock.milliseconds += 60 * 60 * 1_000;
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => sessions.authenticate(created.credential)),
+    );
+    expect(results.every((result) => result !== null)).toBe(true);
+    expect(
+      await testEnv.DB.prepare("SELECT last_active_at FROM principals WHERE id = ?")
+        .bind("principal-a")
+        .first("last_active_at"),
+    ).toBe(clock.milliseconds / 1_000);
+    await sessions.revoke("principal-a", created.id);
+    await expect(sessions.authenticate(created.credential)).resolves.toBeNull();
+  });
+
+  it.each(["revocation", "expiry"] as const)(
+    "fails closed when %s races an hourly update",
+    async (race) => {
+      await addPrincipal("principal-a");
+      const created = await createSession({
+        principalId: "principal-a",
+        deviceName: "Browser",
+        clientKind: "web",
+      });
+      clock.milliseconds += 60 * 60 * 1_000;
+      const timestamp = clock.milliseconds / 1_000;
+      const assignment =
+        race === "revocation" ? `revoked_at = ${timestamp}` : `idle_expires_at = ${timestamp}`;
+      await testEnv.DB.prepare(
+        `CREATE TRIGGER test_usage_race BEFORE UPDATE OF last_used_at ON device_sessions
+      BEGIN UPDATE device_sessions SET ${assignment} WHERE id = OLD.id; SELECT RAISE(IGNORE); END`,
+      ).run();
+      try {
+        await expect(sessions.authenticate(created.credential)).resolves.toBeNull();
+        await expect(sessions.authenticate(created.credential)).resolves.toBeNull();
+      } finally {
+        await testEnv.DB.prepare("DROP TRIGGER test_usage_race").run();
+      }
+    },
+  );
+
   it("does not use matching email metadata as identity or authority", async () => {
     await addPrincipal("principal-a");
     await addPrincipal("principal-b");
     await addGoogleIdentity("identity-a", "principal-a", "immutable-subject-a");
     await addGoogleIdentity("identity-b", "principal-b", "immutable-subject-b");
-    const first = await sessions.create({
+    const first = await createSession({
       principalId: "principal-a",
       deviceName: "First",
       clientKind: "web",
     });
-    const second = await sessions.create({
+    const second = await createSession({
       principalId: "principal-b",
       deviceName: "Second",
       clientKind: "ios",
@@ -303,7 +387,7 @@ describe("device sessions against migrated D1", () => {
 
   it("rejects malformed credentials without broadening locator lookup", async () => {
     await addPrincipal("principal-a");
-    const created = await sessions.create({
+    const created = await createSession({
       principalId: "principal-a",
       deviceName: "Browser",
       clientKind: "web",
@@ -331,7 +415,7 @@ describe("device sessions against migrated D1", () => {
 
   it("does not accept the stored digest as the bearer secret", async () => {
     await addPrincipal("principal-a");
-    const created = await sessions.create({
+    const created = await createSession({
       principalId: "principal-a",
       deviceName: "Browser",
       clientKind: "web",
@@ -346,12 +430,12 @@ describe("device sessions against migrated D1", () => {
   it("rejects locator substitution and cross-principal revocation indistinguishably", async () => {
     await addPrincipal("principal-a");
     await addPrincipal("principal-b");
-    const first = await sessions.create({
+    const first = await createSession({
       principalId: "principal-a",
       deviceName: "First",
       clientKind: "web",
     });
-    const second = await sessions.create({
+    const second = await createSession({
       principalId: "principal-b",
       deviceName: "Second",
       clientKind: "ios",
@@ -367,12 +451,12 @@ describe("device sessions against migrated D1", () => {
 
   it("fails at idle and absolute expiry boundaries", async () => {
     await addPrincipal("principal-a");
-    const idle = await sessions.create({
+    const idle = await createSession({
       principalId: "principal-a",
       deviceName: "Idle boundary",
       clientKind: "obsidian",
     });
-    const absolute = await sessions.create({
+    const absolute = await createSession({
       principalId: "principal-a",
       deviceName: "Absolute boundary",
       clientKind: "android",
@@ -392,7 +476,7 @@ describe("device sessions against migrated D1", () => {
 
   it("throttles usage writes to hourly and caps idle expiry at absolute expiry", async () => {
     await addPrincipal("principal-a");
-    const created = await sessions.create({
+    const created = await createSession({
       principalId: "principal-a",
       deviceName: "Frequently used",
       clientKind: "ios",
@@ -420,7 +504,7 @@ describe("device sessions against migrated D1", () => {
 
   it("revokes only an owned session and revoked sessions cannot authenticate", async () => {
     await addPrincipal("principal-a");
-    const created = await sessions.create({
+    const created = await createSession({
       principalId: "principal-a",
       deviceName: "Old phone",
       clientKind: "android",
@@ -433,45 +517,21 @@ describe("device sessions against migrated D1", () => {
     await expect(sessions.authenticate(created.credential)).resolves.toBeNull();
   });
 
-  it("requires an existing principal and deletion immediately removes session authority", async () => {
+  it("deletion immediately removes session authority", async () => {
     await addPrincipal("principal-a");
-    const created = await sessions.create({
+    const created = await createSession({
       principalId: "principal-a",
       deviceName: "Browser",
       clientKind: "web",
     });
 
-    await expect(
-      sessions.create({
-        principalId: "missing-principal",
-        deviceName: "Browser",
-        clientKind: "web",
-      }),
-    ).rejects.toBeInstanceOf(PrincipalUnavailableError);
     await testEnv.DB.prepare("DELETE FROM principals WHERE id = 'principal-a'").run();
     await expect(sessions.authenticate(created.credential)).resolves.toBeNull();
     await expect(sessions.list("principal-a")).resolves.toEqual([]);
   });
 
-  it("strictly validates device names, client kinds, identifiers, and pepper size", async () => {
-    await addPrincipal("principal-a");
-    const invalidNames = ["", " leading", "trailing ", "line\nbreak", "x".repeat(129)];
-    for (const deviceName of invalidNames) {
-      await expect(
-        sessions.create({ principalId: "principal-a", deviceName, clientKind: "web" }),
-      ).rejects.toBeInstanceOf(DeviceSessionInputError);
-    }
-
-    await expect(
-      sessions.create({
-        principalId: "principal-a",
-        deviceName: "Browser",
-        clientKind: "desktop" as DeviceClientKind,
-      }),
-    ).rejects.toBeInstanceOf(DeviceSessionInputError);
-    await expect(
-      sessions.create({ principalId: "", deviceName: "Browser", clientKind: "web" }),
-    ).rejects.toBeInstanceOf(DeviceSessionInputError);
+  it("strictly validates principal identifiers and pepper size", async () => {
+    await expect(sessions.list("")).rejects.toBeInstanceOf(DeviceSessionInputError);
     expect(
       () =>
         new DeviceSessions({
@@ -492,6 +552,8 @@ describe("device sessions against migrated D1", () => {
       transactionId: "transaction-success",
       expectedPollingDigest: "poll-transaction-success",
       expectedTasknotesPkceChallenge: "challenge-transaction-success",
+      expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     });
     expect(redeemed).toMatchObject({
       deviceName: "Redeemed browser",
@@ -522,13 +584,6 @@ describe("device sessions against migrated D1", () => {
       consumed_at: START / 1_000,
       consumed_type: "integer",
     });
-
-    const ordinary = await sessions.create({
-      principalId: "principal-a",
-      deviceName: "Ordinary",
-      clientKind: "ios",
-    });
-    expect((await storedSession(ordinary.id)).redemption_transaction_id).toBeNull();
   });
 
   it("allows exactly one winner across twenty concurrent redemptions and rejects replay", async () => {
@@ -539,6 +594,8 @@ describe("device sessions against migrated D1", () => {
       transactionId: "transaction-race",
       expectedPollingDigest: "poll-transaction-race",
       expectedTasknotesPkceChallenge: "challenge-transaction-race",
+      expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
 
     const attempts = await Promise.all(
@@ -567,6 +624,8 @@ describe("device sessions against migrated D1", () => {
       transactionId: "transaction-binding",
       expectedPollingDigest: "poll-transaction-binding",
       expectedTasknotesPkceChallenge: "challenge-transaction-binding",
+      expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
 
     await expect(
@@ -576,6 +635,8 @@ describe("device sessions against migrated D1", () => {
       sessions.redeemSignInTransaction({
         ...input,
         expectedTasknotesPkceChallenge: "wrong-challenge",
+        expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -585,6 +646,8 @@ describe("device sessions against migrated D1", () => {
         transactionId: "transaction-connect",
         expectedPollingDigest: "poll-transaction-connect",
         expectedTasknotesPkceChallenge: "challenge-transaction-connect",
+        expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -596,6 +659,8 @@ describe("device sessions against migrated D1", () => {
         transactionId: "transaction-expired",
         expectedPollingDigest: "poll-transaction-expired",
         expectedTasknotesPkceChallenge: "challenge-transaction-expired",
+        expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -608,6 +673,8 @@ describe("device sessions against migrated D1", () => {
         transactionId: "transaction-deleted",
         expectedPollingDigest: "poll-transaction-deleted",
         expectedTasknotesPkceChallenge: "challenge-transaction-deleted",
+        expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -621,11 +688,14 @@ describe("device sessions against migrated D1", () => {
       transactionId: "transaction-input",
       expectedPollingDigest: "poll-transaction-input",
       expectedTasknotesPkceChallenge: "challenge-transaction-input",
+      expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
     for (const input of [
       { ...valid, transactionId: "x".repeat(257) },
       { ...valid, expectedPollingDigest: "poll\u0000digest" },
       { ...valid, expectedTasknotesPkceChallenge: "x".repeat(129) },
+      { ...valid, expectedConfirmationDigest: "" },
     ]) {
       await expect(sessions.redeemSignInTransaction(input)).rejects.toBeInstanceOf(
         DeviceSessionInputError,
@@ -641,6 +711,8 @@ describe("device sessions against migrated D1", () => {
       transactionId: "transaction-lost",
       expectedPollingDigest: "poll-transaction-lost",
       expectedTasknotesPkceChallenge: "challenge-transaction-lost",
+      expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
 
     await sessions.redeemSignInTransaction(input); // Simulate committing before the response is lost.
@@ -663,6 +735,8 @@ describe("device sessions against migrated D1", () => {
       transactionId: "transaction-cleanup",
       expectedPollingDigest: "poll-transaction-cleanup",
       expectedTasknotesPkceChallenge: "challenge-transaction-cleanup",
+      expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     });
     if (redeemed === null) {
       throw new Error("expected redeemed session");
@@ -694,6 +768,8 @@ describe("device sessions against migrated D1", () => {
           transactionId: "transaction-trigger",
           expectedPollingDigest: "poll-transaction-trigger",
           expectedTasknotesPkceChallenge: "challenge-transaction-trigger",
+          expectedConfirmationDigest: "C".repeat(43),
+          webOriginAllowed: true,
         }),
       ).rejects.toThrow("simulated consume failure");
       await expect(

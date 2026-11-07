@@ -68,7 +68,7 @@ interface Started {
 async function start(path: string, credential?: string, name = "E2E Browser"): Promise<Started> {
   const response = await post(
     path,
-    { client_kind: "web", device_name: name, code_challenge: await challenge() },
+    { client_kind: "obsidian", device_name: name, code_challenge: await challenge() },
     credential,
   );
   expect(response.status).toBe(201);
@@ -96,7 +96,10 @@ async function signIn(name = "E2E Browser"): Promise<SignedIn> {
   const location = await authorize(started);
   const callbackResponse = await callback(location);
   expect(callbackResponse.status).toBe(200);
-  await expect(callbackResponse.json()).resolves.toEqual({ status: "complete" });
+  const confirmationCode = /class="code"[^>]*>([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})</u.exec(
+    await callbackResponse.text(),
+  )?.[1];
+  expect(confirmationCode).toBeDefined();
   const status = await post(`/v1/sign-in/${started.transaction_id}/status`, {
     polling_secret: started.polling_secret,
   });
@@ -104,6 +107,7 @@ async function signIn(name = "E2E Browser"): Promise<SignedIn> {
   const redeemed = await post(`/v1/sign-in/${started.transaction_id}/redeem`, {
     polling_secret: started.polling_secret,
     code_verifier: verifier,
+    confirmation_code: confirmationCode,
   });
   expect(redeemed.status).toBe(200);
   const value = await redeemed.json<{ session: { credential: string; session_id: string } }>();
@@ -155,7 +159,7 @@ describe("Worker HTTP OAuth and account slice", () => {
     await expect(session.json()).resolves.toMatchObject({
       principal_id: signedIn.principalId,
       session_id: signedIn.session_id,
-      client_kind: "web",
+      client_kind: "obsidian",
       device_name: "E2E Browser",
     });
     await expect(
@@ -268,7 +272,7 @@ describe("Worker HTTP OAuth and account slice", () => {
       const location = await authorize(started);
       const response = await callback(location);
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({ status: "complete" });
+      expect(await response.text()).toContain("Authorization not completed");
       const status = await post(`/v1/sign-in/${started.transaction_id}/status`, {
         polling_secret: started.polling_secret,
       });
@@ -291,7 +295,7 @@ describe("Worker HTTP OAuth and account slice", () => {
       await configure({ token });
       const response = await callback(location);
       expect(response.status).toBe(200);
-      expect(await response.text()).toBe('{"status":"complete"}');
+      expect(await response.text()).toContain("Authorization not completed");
       const status = await post(`/v1/sign-in/${started.transaction_id}/status`, {
         polling_secret: started.polling_secret,
       });
@@ -328,11 +332,17 @@ describe("Worker HTTP OAuth and account slice", () => {
     expect(callbacks.every((response) => response.status === 200)).toBe(true);
     expect(await stats()).toMatchObject({ uniqueCodeExchanges: 1, tokenRequests: 1 });
 
+    const callbackBodies = await Promise.all(callbacks.map((response) => response.text()));
+    const confirmationCode = /class="code"[^>]*>([23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8})</u.exec(
+      callbackBodies.join(""),
+    )?.[1];
+    expect(confirmationCode).toBeDefined();
     const redemptions = await Promise.all(
       Array.from({ length: 20 }, () =>
         post(`/v1/sign-in/${started.transaction_id}/redeem`, {
           polling_secret: started.polling_secret,
           code_verifier: verifier,
+          confirmation_code: confirmationCode,
         }),
       ),
     );
@@ -371,6 +381,7 @@ describe("Worker HTTP OAuth and account slice", () => {
             {
               id: "private-event-id",
               status: "confirmed",
+              etag: '"1"',
               updated: "2026-01-01T10:00:00Z",
               summary: "Timed",
               start: { dateTime: "2026-01-02T10:00:00Z" },
@@ -379,6 +390,7 @@ describe("Worker HTTP OAuth and account slice", () => {
             {
               id: "private-all-day-id",
               status: "confirmed",
+              etag: '"1"',
               updated: "2026-01-01T10:00:00Z",
               start: { date: "2026-01-03" },
               end: { date: "2026-01-04" },
@@ -391,6 +403,7 @@ describe("Worker HTTP OAuth and account slice", () => {
             {
               id: "private-tombstone-id",
               status: "cancelled",
+              etag: '"1"',
               updated: "2026-01-02T10:00:00Z",
               recurringEventId: "private-series-id",
               originalStartTime: { dateTime: "2026-01-04T10:00:00Z" },
@@ -410,7 +423,7 @@ describe("Worker HTTP OAuth and account slice", () => {
     }>();
     expect(calendars?.calendars).toHaveLength(2);
     const discoveredWork = calendars?.calendars.find((calendar) => calendar.name === "Work");
-    expect(discoveredWork).toMatchObject({ name: "Work", color: null });
+    expect(discoveredWork).toMatchObject({ name: "Work", can_write: true });
     expect((await stats()).calendarListCalls).toBe(1);
 
     await configure({
@@ -435,10 +448,11 @@ describe("Worker HTTP OAuth and account slice", () => {
     const rediscoveredValue = await rediscovered.json<{
       calendars: { id: string; name: string }[];
     }>();
-    expect(rediscoveredValue.calendars).toEqual([
-      { ...rediscoveredValue.calendars[0], id: discoveredWork?.id, name: "Work renamed" },
-    ]);
-    expect((await stats()).calendarListCalls).toBe(2);
+    expect(rediscoveredValue.calendars).toHaveLength(2);
+    expect(
+      rediscoveredValue.calendars.find((calendar) => calendar.id === discoveredWork?.id)?.name,
+    ).toBe("Work");
+    expect((await stats()).calendarListCalls).toBe(1);
 
     const publicId = discoveredWork?.id ?? "missing";
     const range = "start=2026-01-01T00%3A00%3A00Z&end=2026-02-01T00%3A00%3A00Z";
@@ -459,7 +473,7 @@ describe("Worker HTTP OAuth and account slice", () => {
     );
     expect(second.status).toBe(200);
     const secondPage = await second.json<{ events: unknown[]; next_cursor: null }>();
-    expect(secondPage.events).toHaveLength(1);
+    expect(secondPage.events).toHaveLength(0);
     expect(secondPage.next_cursor).toBeNull();
     expect(JSON.stringify(secondPage)).not.toContain("private-");
     expect(

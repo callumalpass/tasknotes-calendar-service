@@ -41,8 +41,9 @@ over silent recovery, and simplification over expansion.
 
 - Read `PRODUCT.md`, `DESIGN.md`, and the relevant ADR before changing a public, persisted,
   configured, security-sensitive, or user-facing contract.
-- Keep the first vertical slice Google-only and read-only. Do not add Microsoft, provider writes,
-  persistent event mirroring, or mdbase materialization until their ADR gate is accepted.
+- Stay Google-only and within the stateless write proxy of ADR 0005. Do not add Microsoft,
+  persistent event mirroring, server-side sync, or mdbase materialization until their ADR gate is
+  accepted.
 - Use strict TypeScript, runtime validation at every external boundary, native Web APIs, explicit
   SQL migrations, and versioned queue/API contracts.
 - Prefer direct provider REST adapters over broad SDK abstractions. Treat all provider payloads,

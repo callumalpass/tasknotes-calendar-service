@@ -1,6 +1,6 @@
 # ADR 0001: Service boundary and first vertical slice
 
-- Status: Accepted
+- Status: Accepted, amended by ADR 0005 (provider writes, incremental reads, scopes)
 - Date: 2026-08-30
 
 ## Decision
@@ -58,9 +58,9 @@ one-time and atomic.
 ## Sessions
 
 Device sessions use opaque 256-bit bearer credentials. D1 stores only a peppered SHA-256 digest.
-Sessions have a 30-day idle and 90-day absolute lifetime and are independently revocable. Web cookie
-transport remains a client-integration decision; raw bearer credentials must not be placed in
-localStorage or URLs.
+Sessions have a 30-day idle and 90-day absolute lifetime and are independently revocable. ADR 0006
+gives web sessions an HttpOnly cookie and native sessions sealed WebCrypto custody; raw bearer
+credentials must not be placed in localStorage or URLs.
 
 ## Token custody
 
