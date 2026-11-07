@@ -1,4 +1,9 @@
-import { OAuthTransactionError, type OAuthTransactions } from "../auth/oauth-transactions";
+import { ABSOLUTE_LIFETIME_SECONDS } from "../auth/device-sessions";
+import {
+  OAuthTransactionError,
+  type OAuthTransactions,
+  type SignInRedemption,
+} from "../auth/oauth-transactions";
 import { LiveGoogleCalendarError } from "../calendar/live-google-calendar";
 import type {
   EventsQuery,
@@ -6,14 +11,19 @@ import type {
   CreateEventRequest,
   PatchEventRequest,
 } from "../contracts";
-import type { ProviderCallbackQuery, TransactionStartRequest } from "../contracts/transactions";
+import {
+  WebSignInRedeemResponseSchema,
+  type ProviderCallbackQuery,
+  type TransactionStartRequest,
+} from "../contracts/transactions";
 import { decryptTokenEnvelope } from "../crypto/token-envelope";
 import type { Env } from "../env";
 import { revokeGoogleTokenBestEffort } from "../provider/google";
 import type { TokenEnvelopeRow } from "../storage/token-envelope-row";
 import { tokenEnvelopeFromRow } from "../storage/token-envelope-row";
 import type { RouteHandlers, RouteInput } from "./router";
-import { ContractError, linkingResponse } from "./responses";
+import { ContractError, jsonResponse, linkingResponse } from "./responses";
+import { sessionCookie } from "./session-cookie";
 import { runtimeConfiguration, type RuntimeConfiguration } from "../runtime/configuration";
 
 interface ConnectionRow extends TokenEnvelopeRow {
@@ -141,22 +151,28 @@ export function createHandlers(env: Env): RouteHandlers {
         configured(),
       );
     },
-    signInRedeem: (input) => {
+    signInRedeem: async (input) => {
       const request = body(input) as {
         polling_secret: string;
         code_verifier: string;
         confirmation_code: string;
       };
-      return oauth(
+      const { session, clientKind } = (await oauth(
         (transactions) =>
           transactions.redeemSignIn(
             input.params["transaction_id"] ?? "",
             request.polling_secret,
             request.code_verifier,
             request.confirmation_code,
+            input.originAllowed,
           ),
         configured(),
-      );
+      )) as SignInRedemption;
+      if (clientKind !== "web") return { session };
+      const { credential, ...webSession } = session;
+      const response = jsonResponse(WebSignInRedeemResponseSchema.parse({ session: webSession }));
+      response.headers.set("set-cookie", sessionCookie(credential, ABSOLUTE_LIFETIME_SECONDS));
+      return response;
     },
     connectStart: (input) =>
       oauth(

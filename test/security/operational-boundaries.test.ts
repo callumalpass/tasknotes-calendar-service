@@ -70,7 +70,7 @@ async function grant(
   const start = await post(
     path,
     {
-      client_kind: "web",
+      client_kind: "obsidian",
       device_name: "canary-device",
       code_challenge: await createPkceS256Challenge(verifier),
     },
@@ -195,7 +195,7 @@ describe("router operational boundaries in workerd", () => {
     "app://obsidian.md",
     "capacitor://localhost",
     "http://localhost",
-  ])("allows exact preflight and response origin %s without credentials", async (origin) => {
+  ])("allows exact preflight and response origin %s", async (origin) => {
     const configured = { ...bindings, ALLOWED_ORIGINS: origin };
     const preflight = await send(
       "/v1/session",
@@ -212,7 +212,7 @@ describe("router operational boundaries in workerd", () => {
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-origin")).toBe(origin);
     expect(preflight.headers.get("access-control-allow-methods")).toBe("GET");
-    expect(preflight.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(preflight.headers.get("access-control-allow-credentials")).toBe("true");
     expect(preflight.headers.get("vary")).toBe("Origin");
     const response = await send("/v1/session", { headers: { origin } }, configured);
     expect(response.status).toBe(401);
@@ -301,7 +301,7 @@ describe("router operational boundaries in workerd", () => {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-              client_kind: "web",
+              client_kind: "obsidian",
               device_name: "Browser",
               code_challenge: await createPkceS256Challenge(verifier),
             }),

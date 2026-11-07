@@ -308,6 +308,7 @@ describe("OAuth transactions against migrated D1", () => {
       started.polling_secret,
       VERIFIER,
       confirmationCode,
+      true,
     );
     expect(redeemed.session.credential).toMatch(/^v1\./u);
     await expect(
@@ -316,6 +317,7 @@ describe("OAuth transactions against migrated D1", () => {
         started.polling_secret,
         VERIFIER,
         confirmationCode,
+        true,
       ),
     ).rejects.toMatchObject({ code: "conflict" });
     expect(
@@ -430,6 +432,7 @@ describe("OAuth transactions against migrated D1", () => {
         started.polling_secret,
         "wrong-tasknotes-verifier-value-that-is-long-enough-123",
         confirmationCode,
+        true,
       ),
     ).rejects.toMatchObject({ code: "not_found" });
     await expect(
@@ -438,6 +441,7 @@ describe("OAuth transactions against migrated D1", () => {
         started.polling_secret,
         VERIFIER,
         confirmationCode,
+        true,
       ),
     ).resolves.toHaveProperty("session.credential");
   });
@@ -454,6 +458,7 @@ describe("OAuth transactions against migrated D1", () => {
           started.polling_secret,
           VERIFIER,
           confirmationCode,
+          true,
         ),
       ),
     );

@@ -88,7 +88,7 @@ function authenticateSuccessfully(value: string) {
           session: {
             id: deviceId,
             deviceName: "Browser",
-            clientKind: "web" as const,
+            clientKind: "obsidian" as const,
             createdAt: instant,
             lastUsedAt: instant,
             idleExpiresAt: instant,
@@ -507,10 +507,11 @@ describe("contract router", () => {
       expect(received?.authenticated).toEqual({
         principalId: id,
         sessionId: deviceId,
+        transport: "bearer",
         session: {
           id: deviceId,
           deviceName: "Browser",
-          clientKind: "web",
+          clientKind: "obsidian",
           createdAt: instant,
           lastUsedAt: instant,
           idleExpiresAt: instant,

@@ -68,7 +68,7 @@ interface Started {
 async function start(path: string, credential?: string, name = "E2E Browser"): Promise<Started> {
   const response = await post(
     path,
-    { client_kind: "web", device_name: name, code_challenge: await challenge() },
+    { client_kind: "obsidian", device_name: name, code_challenge: await challenge() },
     credential,
   );
   expect(response.status).toBe(201);
@@ -159,7 +159,7 @@ describe("Worker HTTP OAuth and account slice", () => {
     await expect(session.json()).resolves.toMatchObject({
       principal_id: signedIn.principalId,
       session_id: signedIn.session_id,
-      client_kind: "web",
+      client_kind: "obsidian",
       device_name: "E2E Browser",
     });
     await expect(

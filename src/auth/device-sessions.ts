@@ -13,7 +13,7 @@ const SESSION_ID_BYTES = 16;
 const CREDENTIAL_SECRET_BYTES = 32;
 const DIGEST_BYTES = 32;
 const IDLE_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
-const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
+export const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
 const LAST_USED_UPDATE_INTERVAL_SECONDS = 60 * 60;
 export const MAX_ACTIVE_DEVICE_SESSIONS = 100;
 const MAX_PRINCIPAL_ID_BYTES = 256;
@@ -35,6 +35,7 @@ export interface RedeemSignInTransactionInput {
   readonly expectedPollingDigest: string;
   readonly expectedTasknotesPkceChallenge: string;
   readonly expectedConfirmationDigest: string;
+  readonly webOriginAllowed: boolean;
 }
 
 export interface DeviceSessionMetadata {
@@ -238,6 +239,7 @@ export class DeviceSessions {
           AND transaction_record.confirmation_code_hash = ?
           AND transaction_record.expires_at > ?
           AND transaction_record.authorized_principal_id IS NOT NULL
+          AND (transaction_record.client_kind <> 'web' OR ?)
           AND (SELECT COUNT(*) FROM device_sessions AS active_session
                WHERE active_session.principal_id = transaction_record.authorized_principal_id
                  AND active_session.revoked_at IS NULL
@@ -258,6 +260,7 @@ export class DeviceSessions {
         input.expectedTasknotesPkceChallenge,
         input.expectedConfirmationDigest,
         now,
+        input.webOriginAllowed ? 1 : 0,
         now,
         now,
         MAX_ACTIVE_DEVICE_SESSIONS,

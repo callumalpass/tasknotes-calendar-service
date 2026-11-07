@@ -129,6 +129,7 @@ async function createSession(input: {
     expectedPollingDigest: `poll-${transactionId}`,
     expectedTasknotesPkceChallenge: `challenge-${transactionId}`,
     expectedConfirmationDigest: "C".repeat(43),
+    webOriginAllowed: true,
   });
   if (redeemed === null) throw new Error("expected redeemed fixture session");
   return redeemed;
@@ -225,6 +226,7 @@ describe("device sessions against migrated D1", () => {
           expectedPollingDigest: `poll-${transactionId}`,
           expectedTasknotesPkceChallenge: `challenge-${transactionId}`,
           expectedConfirmationDigest: "C".repeat(43),
+          webOriginAllowed: true,
         }),
       ),
     );
@@ -265,6 +267,7 @@ describe("device sessions against migrated D1", () => {
         expectedPollingDigest: "poll-transaction-redemption-limit",
         expectedTasknotesPkceChallenge: "challenge-transaction-redemption-limit",
         expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
     await expect(
@@ -550,6 +553,7 @@ describe("device sessions against migrated D1", () => {
       expectedPollingDigest: "poll-transaction-success",
       expectedTasknotesPkceChallenge: "challenge-transaction-success",
       expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     });
     expect(redeemed).toMatchObject({
       deviceName: "Redeemed browser",
@@ -591,6 +595,7 @@ describe("device sessions against migrated D1", () => {
       expectedPollingDigest: "poll-transaction-race",
       expectedTasknotesPkceChallenge: "challenge-transaction-race",
       expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
 
     const attempts = await Promise.all(
@@ -620,6 +625,7 @@ describe("device sessions against migrated D1", () => {
       expectedPollingDigest: "poll-transaction-binding",
       expectedTasknotesPkceChallenge: "challenge-transaction-binding",
       expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
 
     await expect(
@@ -630,6 +636,7 @@ describe("device sessions against migrated D1", () => {
         ...input,
         expectedTasknotesPkceChallenge: "wrong-challenge",
         expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -640,6 +647,7 @@ describe("device sessions against migrated D1", () => {
         expectedPollingDigest: "poll-transaction-connect",
         expectedTasknotesPkceChallenge: "challenge-transaction-connect",
         expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -652,6 +660,7 @@ describe("device sessions against migrated D1", () => {
         expectedPollingDigest: "poll-transaction-expired",
         expectedTasknotesPkceChallenge: "challenge-transaction-expired",
         expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -665,6 +674,7 @@ describe("device sessions against migrated D1", () => {
         expectedPollingDigest: "poll-transaction-deleted",
         expectedTasknotesPkceChallenge: "challenge-transaction-deleted",
         expectedConfirmationDigest: "C".repeat(43),
+        webOriginAllowed: true,
       }),
     ).resolves.toBeNull();
 
@@ -679,6 +689,7 @@ describe("device sessions against migrated D1", () => {
       expectedPollingDigest: "poll-transaction-input",
       expectedTasknotesPkceChallenge: "challenge-transaction-input",
       expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
     for (const input of [
       { ...valid, transactionId: "x".repeat(257) },
@@ -701,6 +712,7 @@ describe("device sessions against migrated D1", () => {
       expectedPollingDigest: "poll-transaction-lost",
       expectedTasknotesPkceChallenge: "challenge-transaction-lost",
       expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     } as const;
 
     await sessions.redeemSignInTransaction(input); // Simulate committing before the response is lost.
@@ -724,6 +736,7 @@ describe("device sessions against migrated D1", () => {
       expectedPollingDigest: "poll-transaction-cleanup",
       expectedTasknotesPkceChallenge: "challenge-transaction-cleanup",
       expectedConfirmationDigest: "C".repeat(43),
+      webOriginAllowed: true,
     });
     if (redeemed === null) {
       throw new Error("expected redeemed session");
@@ -756,6 +769,7 @@ describe("device sessions against migrated D1", () => {
           expectedPollingDigest: "poll-transaction-trigger",
           expectedTasknotesPkceChallenge: "challenge-transaction-trigger",
           expectedConfirmationDigest: "C".repeat(43),
+          webOriginAllowed: true,
         }),
       ).rejects.toThrow("simulated consume failure");
       await expect(

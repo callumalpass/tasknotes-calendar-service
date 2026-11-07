@@ -1,5 +1,5 @@
 import { CALENDAR_SCOPES, normalizeGoogleScopes } from "./google-scopes";
-import type { CreatedDeviceSession, DeviceSessions } from "./device-sessions";
+import type { CreatedDeviceSession, DeviceClientKind, DeviceSessions } from "./device-sessions";
 import type { IdentityDeletion } from "./identity-deletion";
 import {
   createGoogleCalendarAuthorizationUrl,
@@ -82,6 +82,10 @@ export interface OAuthTransactionsDependencies {
   readonly identityDeletion: Pick<IdentityDeletion, "fenceDigest">;
   readonly deviceSessions: Pick<DeviceSessions, "redeemSignInTransaction">;
   readonly google: GoogleOAuthTransactionsDependency;
+}
+
+export interface SignInRedemption extends SignInRedeemResponse {
+  readonly clientKind: DeviceClientKind;
 }
 
 export interface OAuthCallbackResult {
@@ -1203,7 +1207,8 @@ export class OAuthTransactions {
     pollingSecret: string,
     tasknotesVerifier: string,
     confirmationCode: string,
-  ): Promise<SignInRedeemResponse> {
+    webOriginAllowed: boolean,
+  ): Promise<SignInRedemption> {
     const transactionId = validateTransactionId(transactionIdValue);
     const { pollingHash, challenge } = await this.#redemptionBindings(
       pollingSecret,
@@ -1239,9 +1244,10 @@ export class OAuthTransactions {
         expectedPollingDigest: pollingHash,
         expectedTasknotesPkceChallenge: challenge,
         expectedConfirmationDigest: confirmationHash,
+        webOriginAllowed,
       });
       if (session === null) return fail("conflict");
-      return { session: this.#sessionCredential(session) };
+      return { session: this.#sessionCredential(session), clientKind: session.clientKind };
     } catch (error) {
       if (error instanceof OAuthTransactionError) throw error;
       return fail("internal");

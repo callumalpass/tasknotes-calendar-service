@@ -65,11 +65,14 @@ paths:
       requestBody: { $ref: "#/components/requestBodies/SignInRedeem" }
       responses:
         "200":
-          description: A one-time device session credential.
+          description: >-
+            A device session. Web sessions receive it only as the Set-Cookie session cookie; other
+            clients receive a one-time credential in the body.
           headers:
             {
               Cache-Control: { $ref: "#/components/headers/NoStore" },
               X-Content-Type-Options: { $ref: "#/components/headers/NoSniff" },
+              Set-Cookie: { $ref: "#/components/headers/SessionCookie" },
             }
           content:
             { application/json: { schema: { $ref: "#/components/schemas/SignInRedeemResponse" } } }
@@ -83,7 +86,7 @@ paths:
     post:
       operationId: connectStart
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       x-max-body-bytes: 131072
       requestBody: { $ref: "#/components/requestBodies/TransactionStart" }
       responses:
@@ -98,7 +101,7 @@ paths:
     post:
       operationId: connectStatus
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       x-max-body-bytes: 131072
       parameters:
         - $ref: "#/components/parameters/TransactionId"
@@ -113,7 +116,7 @@ paths:
     post:
       operationId: connectRedeem
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       x-max-body-bytes: 131072
       parameters:
         - $ref: "#/components/parameters/TransactionId"
@@ -139,7 +142,7 @@ paths:
     get:
       operationId: session
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Session" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -148,7 +151,7 @@ paths:
     get:
       operationId: connections
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Connections" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -157,7 +160,7 @@ paths:
     delete:
       operationId: disconnect
       tags: [Connections]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/ConnectionId"
       responses:
@@ -169,7 +172,7 @@ paths:
     get:
       operationId: calendars
       tags: [Calendar]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Calendars" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -184,7 +187,7 @@ paths:
         Reads at most 250 events from one calendar and one provider page for a range no longer than
         93 days.
       tags: [Calendar]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/CalendarId"
         - {
@@ -216,7 +219,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
     post:
       operationId: createEvent
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/CalendarId"
       requestBody:
@@ -245,7 +248,7 @@ paths:
   /v1/calendars/{calendar_id}/changes:
     get:
       operationId: changes
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/CalendarId"
         - {
@@ -278,7 +281,7 @@ paths:
   /v1/calendars/{calendar_id}/events/{event_id}:
     get:
       operationId: getEvent
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/CalendarId"
         - {
@@ -302,7 +305,7 @@ paths:
         "500": { $ref: "#/components/responses/InternalError" }
     patch:
       operationId: patchEvent
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/CalendarId"
         - {
@@ -342,7 +345,7 @@ paths:
           }
     delete:
       operationId: deleteEvent
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/CalendarId"
         - {
@@ -375,7 +378,7 @@ paths:
     get:
       operationId: devices
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "200": { $ref: "#/components/responses/Devices" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -384,7 +387,7 @@ paths:
     delete:
       operationId: revokeDevice
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       parameters:
         - $ref: "#/components/parameters/DeviceId"
       responses:
@@ -396,7 +399,7 @@ paths:
     delete:
       operationId: deleteAccount
       tags: [Account]
-      security: [{ bearerAuth: [] }]
+      security: [{ bearerAuth: [] }, { sessionCookie: [] }]
       responses:
         "204": { $ref: "#/components/responses/NoContent" }
         "401": { $ref: "#/components/responses/AuthenticationRequired" }
@@ -448,7 +451,15 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-tasknotes_session
+      description: Web sessions only. Every request must carry an allow-listed Origin.
   headers:
+    SessionCookie:
+      description: HttpOnly web session cookie, set when the redeemed session's client kind is web.
+      schema: { type: string }
     NoStore: { schema: { type: string, const: "private, no-store" } }
     NoSniff: { schema: { type: string, const: nosniff } }
     RetryAfter: { schema: { type: integer, minimum: 1, maximum: 300 } }
@@ -615,11 +626,23 @@ components:
         session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+    WebSession:
+      type: object
+      additionalProperties: false
+      required: [session_id, idle_expires_at, absolute_expires_at]
+      properties:
+        session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
+        idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
+        absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     SignInRedeemResponse:
       type: object
       additionalProperties: false
       required: [session]
-      properties: { session: { $ref: "#/components/schemas/SessionCredential" } }
+      properties:
+        session:
+          oneOf:
+            - { $ref: "#/components/schemas/SessionCredential" }
+            - { $ref: "#/components/schemas/WebSession" }
     ConnectRedeemResponse:
       type: object
       additionalProperties: false

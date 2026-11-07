@@ -69,7 +69,7 @@ interface Started {
 async function start(path: string, credential?: string): Promise<Started> {
   const response = await post(
     path,
-    { client_kind: "web", device_name: "Security browser", code_challenge: await challenge() },
+    { client_kind: "obsidian", device_name: "Security browser", code_challenge: await challenge() },
     credential,
   );
   expect(response.status).toBe(201);
@@ -280,9 +280,11 @@ describe("Worker HTTP security boundaries", () => {
         {
           params: { connection_id: connection.id },
           query: {},
+          originAllowed: false,
           authenticated: {
             principalId: authenticated.principalId,
             sessionId: authenticated.session.id,
+            transport: "bearer",
             session: authenticated.session,
           },
         },

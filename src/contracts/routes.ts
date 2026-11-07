@@ -136,7 +136,7 @@ export const routes: readonly RouteDefinition[] = [
     body: SignInRedeemRequestSchema,
     query: EmptyObjectSchema,
     params: transactionParams,
-    response: SignInRedeemResponseSchema,
+    response: z.union([SignInRedeemResponseSchema, CallbackResponseSchema]),
     successStatus: 200,
   },
   {

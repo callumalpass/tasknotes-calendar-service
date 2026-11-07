@@ -62,6 +62,9 @@ export const SessionCredentialSchema = z.strictObject({
 });
 
 export const SignInRedeemResponseSchema = z.strictObject({ session: SessionCredentialSchema });
+export const WebSignInRedeemResponseSchema = z.strictObject({
+  session: SessionCredentialSchema.omit({ credential: true }),
+});
 
 export const ConnectRedeemResponseSchema = z.strictObject({
   connection_id: UuidSchema,

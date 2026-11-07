@@ -6,10 +6,12 @@ import {
   type RouteName,
 } from "../contracts";
 import { ContractError, errorResponse, jsonResponse, noContentResponse } from "./responses";
+import { CLEARED_SESSION_COOKIE, parseSessionCookie } from "./session-cookie";
 
 export interface AuthenticatedRouteContext {
   readonly principalId: string;
   readonly sessionId: string;
+  readonly transport: "bearer" | "cookie";
   readonly session: Readonly<{
     readonly id: string;
     readonly deviceName: string;
@@ -26,6 +28,7 @@ export interface RouteInput {
   readonly params: Readonly<Record<string, string>>;
   readonly query: unknown;
   readonly body?: unknown;
+  readonly originAllowed: boolean;
   readonly authenticated?: AuthenticatedRouteContext;
 }
 
@@ -94,9 +97,13 @@ function parseBearerCredential(request: Request): string | null {
 async function authenticate(
   request: Request,
   authentication: RouterAuthentication,
+  originAllowed: boolean,
 ): Promise<AuthenticatedRouteContext> {
-  const credential = parseBearerCredential(request);
+  const transport = request.headers.has("authorization") ? "bearer" : "cookie";
+  const credential =
+    transport === "bearer" ? parseBearerCredential(request) : parseSessionCookie(request);
   if (credential === null) throw new AuthenticationRequiredError();
+  if (transport === "cookie" && !originAllowed) throw new ContractError("permission_denied");
   let result;
   try {
     result = await authentication.authenticate(credential);
@@ -104,8 +111,17 @@ async function authenticate(
     throw new Error("Authentication dependency failed");
   }
   if (result === null) throw new AuthenticationRequiredError();
+  // ADR 0006: a session's client kind fixes its transport.
+  if ((result.session.clientKind === "web") !== (transport === "cookie")) {
+    throw new AuthenticationRequiredError();
+  }
   const session = Object.freeze({ ...result.session });
-  return Object.freeze({ principalId: result.principalId, sessionId: session.id, session });
+  return Object.freeze({
+    principalId: result.principalId,
+    sessionId: session.id,
+    transport,
+    session,
+  });
 }
 
 function parseQuery(url: URL): Record<string, string | string[]> {
@@ -214,6 +230,17 @@ function parseParameters(route: CompiledRoute, match: RegExpExecArray): Record<s
   return result;
 }
 
+function endsOwnSession(
+  route: CompiledRoute,
+  params: Readonly<Record<string, string>>,
+  authenticated: AuthenticatedRouteContext,
+): boolean {
+  return (
+    route.definition.name === "deleteAccount" ||
+    (route.definition.name === "revokeDevice" && params["device_id"] === authenticated.sessionId)
+  );
+}
+
 async function dispatch(
   route: CompiledRoute,
   match: RegExpExecArray,
@@ -221,10 +248,11 @@ async function dispatch(
   handlers: RouteHandlers,
   authentication: RouterAuthentication,
   rateLimiter: RateLimit,
+  originAllowed: boolean,
   ctx: ExecutionContext,
 ): Promise<Response> {
   const authenticated = route.definition.authenticated
-    ? await authenticate(request, authentication)
+    ? await authenticate(request, authentication, originAllowed)
     : undefined;
   if (route.definition.rateLimit !== "none") {
     const key =
@@ -267,6 +295,7 @@ async function dispatch(
   const input: RouteInput = Object.freeze({
     params,
     query: queryResult.data,
+    originAllowed,
     ...(route.definition.body === undefined ? {} : { body }),
     ...(authenticated === undefined ? {} : { authenticated }),
   });
@@ -274,7 +303,11 @@ async function dispatch(
 
   if (route.definition.response === undefined) {
     if (output !== undefined) throw new Error("No-content handler returned a response body");
-    return noContentResponse();
+    const response = noContentResponse();
+    if (authenticated?.transport === "cookie" && endsOwnSession(route, params, authenticated)) {
+      response.headers.set("set-cookie", CLEARED_SESSION_COOKIE);
+    }
+    return response;
   }
   const responseResult = route.definition.response.safeParse(output);
   if (!responseResult.success) throw new Error("Handler response violated its contract");
@@ -344,6 +377,7 @@ export function createRouter(
           handlers,
           authentication,
           policy.rateLimiter,
+          allowedOrigin !== undefined,
           ctx,
         );
       }
@@ -370,6 +404,7 @@ export function createRouter(
     response.headers.append("vary", "Origin");
     if (allowedOrigin !== undefined) {
       response.headers.set("access-control-allow-origin", allowedOrigin);
+      response.headers.set("access-control-allow-credentials", "true");
       response.headers.set("access-control-expose-headers", "x-request-id, Retry-After");
     }
     console.log({
