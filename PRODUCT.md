@@ -11,8 +11,8 @@ authorization.
 
 A person can authorize Google once and, from any TaskNotes client authenticated as the same
 immutable Google identity, list their calendars, read bounded or incremental event pages, and
-create, update, or delete events. Clients own task-to-event mapping and sync logic. Google
-credentials remain encrypted in the service and never enter TaskNotes clients or mdbase collections.
+create, update, or delete events. Google credentials remain encrypted in the service and never enter
+TaskNotes clients or mdbase collections.
 
 ## Principles
 
@@ -34,7 +34,8 @@ credentials remain encrypted in the service and never enter TaskNotes clients or
 ## Non-goals
 
 - Microsoft Calendar
-- Server-side task-to-event synchronization, webhooks, or background sync
+- Writing TaskNotes tasks into external calendars, in the service or in any TaskNotes client
+- Webhooks or background sync
 - Storing task data or task-to-event mappings in the service
 - Persistent full-calendar mirroring
 - Writing external events into mdbase collections
