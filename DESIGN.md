@@ -34,6 +34,12 @@ cannot fail a calendar. Public event and series identifiers are sealed, determin
 reversible only under the environment's key and the authorization-resolved calendar, and they convey
 no authority.
 
+Events also report whether they block time, what kind of entry they are, and the signed-in person's
+own answer to an invitation. These are display metadata: a value the service cannot use reads as the
+plain default and never omits the event. Only the person's own attendee entry is ever asked of the
+provider; no other attendee is read. Calendars report the person's own name for them, the provider's
+colour, and whether the person shows them in the provider's interface. See ADR 0007.
+
 ## Provider writes
 
 Writes are authorized like reads, rechecked immediately before the provider call, and never stored.

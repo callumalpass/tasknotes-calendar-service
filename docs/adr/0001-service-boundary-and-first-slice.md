@@ -82,7 +82,8 @@ event mirror, event mapping table, or event cache. Authenticated responses are `
 
 Event titles, descriptions, locations, attendee data, conference links, and raw provider responses
 never enter telemetry. The first public event shape excludes attendees, organizers, conference
-links, HTML links, and raw recurrence rules.
+links, HTML links, and raw recurrence rules. ADR 0007 adds the signed-in person's own invitation
+answer and nothing else about attendees.
 
 ## Deletion and failure
 

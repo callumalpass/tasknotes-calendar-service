@@ -23,6 +23,9 @@ function timedEvent() {
     end: { kind: "date_time", date_time: "2026-09-01T11:00:00Z" },
     updated_at: "2026-08-30T12:00:00Z",
     recurrence: null,
+    transparency: "opaque",
+    event_type: "default",
+    self_response: null,
   };
 }
 
@@ -96,8 +99,14 @@ describe("public contract schemas", () => {
       can_write: true,
       time_zone: "Europe/London",
       is_primary: true,
+      is_selected: true,
+      color: "#0088aa",
     };
     expect(CalendarSchema.safeParse(calendar).success).toBe(true);
+    expect(CalendarSchema.safeParse({ ...calendar, color: null }).success).toBe(true);
+    for (const color of ["#0088AA", "#08a", "0088aa", "red", "#0088aa "]) {
+      expect(CalendarSchema.safeParse({ ...calendar, color }).success).toBe(false);
+    }
     expect(CalendarSchema.safeParse({ ...calendar, name: "😀".repeat(501) }).success).toBe(false);
     expect(CalendarSchema.safeParse({ ...calendar, description: "😀".repeat(4001) }).success).toBe(
       false,
@@ -105,6 +114,28 @@ describe("public contract schemas", () => {
     expect(CalendarSchema.safeParse({ ...calendar, time_zone: "😀".repeat(101) }).success).toBe(
       false,
     );
+  });
+
+  it("accepts only the published availability, entry kinds and answers", () => {
+    for (const fields of [
+      { transparency: "transparent" },
+      { event_type: "working_location" },
+      { event_type: "from_gmail" },
+      { self_response: "declined" },
+      { self_response: "needs_action" },
+    ]) {
+      expect(EventSchema.safeParse({ ...timedEvent(), ...fields }).success).toBe(true);
+    }
+    for (const fields of [
+      { transparency: "busy" },
+      { transparency: null },
+      { event_type: "workingLocation" },
+      { event_type: null },
+      { self_response: "needsAction" },
+      { self_response: undefined },
+    ]) {
+      expect(EventSchema.safeParse({ ...timedEvent(), ...fields }).success).toBe(false);
+    }
   });
 
   it("enforces strict scheduled variants, ordered matching boundaries, and recurrence", () => {

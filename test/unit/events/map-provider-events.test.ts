@@ -26,6 +26,7 @@ function event(overrides: Partial<ProviderEvent> = {}): ProviderEvent {
     etag: '"1"',
     title: "Planning",
     transparency: "opaque",
+    type: "default",
     start: { kind: "timed", dateTime: "2026-09-01T10:00:00Z" },
     end: { kind: "timed", dateTime: "2026-09-01T11:00:00Z" },
     ...overrides,
@@ -56,6 +57,21 @@ describe("provider event public mapping", () => {
       end: { kind: "date_time", date_time: "2026-09-01T11:00:00Z" },
       updated_at: "2026-08-30T12:00:00Z",
       recurrence: null,
+      transparency: "opaque",
+      event_type: "default",
+      self_response: null,
+    });
+  });
+
+  it("carries availability, the kind of entry and the person's own answer", async () => {
+    const [mapped] = await mapProviderEvents(
+      [event({ transparency: "transparent", type: "working_location", selfResponse: "declined" })],
+      context,
+    );
+    expect(mapped).toMatchObject({
+      transparency: "transparent",
+      event_type: "working_location",
+      self_response: "declined",
     });
   });
 
@@ -118,6 +134,7 @@ describe("provider event public mapping", () => {
           status: "cancelled",
           updatedAt: "2026-08-30T12:00:00Z",
           transparency: "opaque",
+          type: "default",
         },
       ],
       context,
@@ -130,6 +147,7 @@ describe("provider event public mapping", () => {
       start: null,
       end: null,
       recurrence: null,
+      self_response: null,
     });
     expect(JSON.stringify(mapped)).not.toContain(providerId);
   });

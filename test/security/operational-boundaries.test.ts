@@ -127,7 +127,7 @@ describe("router operational boundaries in workerd", () => {
   });
 
   it("enforces the native rate binding by IP before parsing anonymous bodies", async () => {
-    const configured = { ...bindings, API_RATE_LIMITER: bindings.TEST_RATE_LIMITER };
+    const configured = { ...bindings, IP_RATE_LIMITER: bindings.TEST_RATE_LIMITER };
     const ip = "198.51.100.1";
     const request = { method: "POST", headers: { "cf-connecting-ip": ip } };
     expect((await send("/v1/sign-in/start", request, configured)).status).toBe(415);
@@ -153,7 +153,7 @@ describe("router operational boundaries in workerd", () => {
   it("uses principal identity across sessions and IPs, not bearer credentials", async () => {
     const first = await signIn();
     const second = await signIn();
-    const configured = { ...bindings, API_RATE_LIMITER: bindings.TEST_RATE_LIMITER };
+    const configured = { ...bindings, PRINCIPAL_RATE_LIMITER: bindings.TEST_RATE_LIMITER };
     const current = await send(
       "/v1/session",
       { headers: { authorization: `Bearer ${first}`, "cf-connecting-ip": "192.0.2.1" } },
@@ -176,10 +176,8 @@ describe("router operational boundaries in workerd", () => {
   });
 
   it("fails closed when the rate binding fails, while health and callback stay unlimited", async () => {
-    const configured = {
-      ...bindings,
-      API_RATE_LIMITER: { limit: () => Promise.reject(new Error("canary-binding-secret")) },
-    };
+    const broken = { limit: () => Promise.reject(new Error("canary-binding-secret")) };
+    const configured = { ...bindings, IP_RATE_LIMITER: broken };
     const response = await send("/v1/sign-in/start", { method: "POST" }, configured);
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("60");
@@ -188,6 +186,20 @@ describe("router operational boundaries in workerd", () => {
     ).toEqual({ count: 0 });
     expect((await send("/health/live", {}, configured)).status).toBe(200);
     expect((await send("/oauth/google/callback", {}, configured)).status).toBe(400);
+  });
+
+  it("keeps the sign-in and signed-in allowances apart", async () => {
+    const credential = await signIn();
+    const session = { headers: { authorization: `Bearer ${credential}` } };
+    const broken = { limit: () => Promise.reject(new Error("canary-binding-secret")) };
+    const withoutIp = { ...bindings, IP_RATE_LIMITER: broken };
+    expect((await send("/v1/session", session, withoutIp)).status).toBe(200);
+    expect((await send("/v1/sign-in/start", { method: "POST" }, withoutIp)).status).toBe(503);
+    const withoutPrincipal = { ...bindings, PRINCIPAL_RATE_LIMITER: broken };
+    expect((await send("/v1/session", session, withoutPrincipal)).status).toBe(503);
+    expect((await send("/v1/sign-in/start", { method: "POST" }, withoutPrincipal)).status).toBe(
+      415,
+    );
   });
 
   it.each([

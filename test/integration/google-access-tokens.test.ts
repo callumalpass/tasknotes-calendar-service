@@ -237,6 +237,28 @@ describe("GoogleAccessTokens with real D1", () => {
     ).rejects.toBeInstanceOf(GoogleAccessTokenError);
   });
 
+  it("answers a fresh grant from the clock the snapshot was read under", async () => {
+    await seed(payload(databaseNow + 90));
+    const queries: string[] = [];
+    const db = new Proxy<D1Database>(testEnv.DB, {
+      get(target, property): unknown {
+        if (property === "prepare") {
+          return (query: string) => {
+            queries.push(query);
+            return target.prepare(query);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? (value.bind(target) as unknown) : value;
+      },
+    });
+    const tokens = service({ db });
+    const snapshot = await tokens.loadForPrincipal(PRINCIPAL);
+    expect(queries).toHaveLength(1);
+    expect((await tokens.access(snapshot!)).accessToken).toBe("old-access-canary");
+    expect(queries).toHaveLength(1);
+  });
+
   it.each([-60, 60])(
     "uses D1 freshness with an isolate clock skew of %s seconds",
     async (isolateSkew) => {

@@ -107,6 +107,8 @@ interface CalendarRow {
   readonly access_role: "reader" | "writer" | "owner";
   readonly time_zone: string | null;
   readonly is_primary: number;
+  readonly is_selected: number;
+  readonly color: string | null;
 }
 
 interface EventGrantRow extends AuthorityRow {
@@ -174,8 +176,11 @@ function publicCalendar(row: CalendarRow): Calendar {
     can_write: row.access_role === "writer" || row.access_role === "owner",
     time_zone: row.time_zone,
     is_primary: row.is_primary === 1,
+    is_selected: row.is_selected === 1,
+    color: row.color,
   };
   if (row.is_primary !== 0 && row.is_primary !== 1) return fail("internal");
+  if (row.is_selected !== 0 && row.is_selected !== 1) return fail("internal");
   return value;
 }
 
@@ -762,6 +767,8 @@ export class LiveGoogleCalendar {
       timeZone: string | null;
       access: ProviderCalendar["access"];
       primary: number;
+      selected: number;
+      color: string | null;
     }[] = [];
     for (const calendar of calendars) {
       if (ids.has(calendar.id)) {
@@ -778,6 +785,8 @@ export class LiveGoogleCalendar {
           timeZone: calendar.timeZone ?? null,
           access: calendar.access,
           primary: calendar.primary ? 1 : 0,
+          selected: calendar.selected ? 1 : 0,
+          color: calendar.color ?? null,
         });
       } catch {
         await this.#release(expected, owner);
@@ -796,14 +805,17 @@ export class LiveGoogleCalendar {
                       json_extract(value, '$.description') AS description,
                       json_extract(value, '$.timeZone') AS time_zone,
                       json_extract(value, '$.access') AS access_role,
-                      json_extract(value, '$.primary') AS is_primary
+                      json_extract(value, '$.primary') AS is_primary,
+                      json_extract(value, '$.selected') AS is_selected,
+                      json_extract(value, '$.color') AS color
                FROM json_each(?)
              )
              INSERT INTO calendars
                (id, principal_id, connection_id, provider_calendar_id, name, description,
-                time_zone, access_role, is_primary, discovered_at, updated_at)
+                time_zone, access_role, is_primary, is_selected, color, discovered_at, updated_at)
              SELECT input.id, ?, ?, input.provider_id, input.name, input.description,
-                    input.time_zone, input.access_role, input.is_primary, unixepoch(), unixepoch()
+                    input.time_zone, input.access_role, input.is_primary, input.is_selected,
+                    input.color, unixepoch(), unixepoch()
              FROM input
              WHERE EXISTS (SELECT 1 FROM connections AS connection JOIN principals AS principal
                ON principal.id = connection.principal_id
@@ -818,7 +830,8 @@ export class LiveGoogleCalendar {
              ON CONFLICT(connection_id, provider_calendar_id) DO UPDATE SET
                name = excluded.name, description = excluded.description,
                time_zone = excluded.time_zone, access_role = excluded.access_role,
-               is_primary = excluded.is_primary, updated_at = MAX(unixepoch(), calendars.updated_at)
+               is_primary = excluded.is_primary, is_selected = excluded.is_selected,
+               color = excluded.color, updated_at = MAX(unixepoch(), calendars.updated_at)
              WHERE calendars.principal_id = excluded.principal_id`,
           )
           .bind(
@@ -951,7 +964,8 @@ export class LiveGoogleCalendar {
       const result = await this.#dependencies.db
         .prepare(
           `SELECT calendar.id, calendar.connection_id, calendar.name, calendar.description,
-                  calendar.access_role, calendar.time_zone, calendar.is_primary
+                  calendar.access_role, calendar.time_zone, calendar.is_primary,
+                  calendar.is_selected, calendar.color
            FROM calendars AS calendar JOIN connections AS connection
              ON connection.id = calendar.connection_id
              AND connection.principal_id = calendar.principal_id

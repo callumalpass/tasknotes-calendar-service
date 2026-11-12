@@ -797,6 +797,12 @@ describe("initial D1 schema invariants", () => {
       ["time_zone", ""],
       ["time_zone", "x".repeat(101)],
       ["access_role", "administrator"],
+      ["color", "#0088AA"],
+      ["color", "#08a"],
+      ["color", "#0088aa0"],
+      ["color", "teal"],
+      ["is_selected", 2],
+      ["is_selected", null],
     ] as const) {
       await expect(
         testEnv.DB.prepare(`UPDATE calendars SET ${column} = ? WHERE id = 'calendar-a'`)
@@ -804,6 +810,16 @@ describe("initial D1 schema invariants", () => {
           .run(),
       ).rejects.toThrow();
     }
+    expect(
+      await testEnv.DB.prepare(
+        "SELECT color, is_selected FROM calendars WHERE id = 'calendar-a'",
+      ).first(),
+    ).toEqual({ color: null, is_selected: 0 });
+    await expect(
+      testEnv.DB.prepare(
+        "UPDATE calendars SET color = '#0088aa', is_selected = 1 WHERE id = 'calendar-a'",
+      ).run(),
+    ).resolves.toMatchObject({ meta: { changes: 1 } });
     for (const providerId of ["", "x".repeat(4097), "line\nbreak", "nul\u0000id"]) {
       await expect(
         calendarResource(

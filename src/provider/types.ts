@@ -36,7 +36,10 @@ export interface ProviderCalendar {
   readonly timeZone?: string;
   readonly access: "reader" | "writer" | "owner";
   readonly primary: boolean;
+  /** Shown in the person's own Google Calendar. */
   readonly selected: boolean;
+  /** Lower-case `#rrggbb`. */
+  readonly color?: string;
 }
 
 export interface ProviderAllDayBoundary {
@@ -57,6 +60,11 @@ export interface ProviderEventRecurrence {
   readonly originalStart: ProviderEventBoundary;
 }
 
+export type ProviderEventType =
+  "default" | "focus_time" | "out_of_office" | "working_location" | "birthday" | "from_gmail";
+
+export type ProviderSelfResponse = "accepted" | "declined" | "tentative" | "needs_action";
+
 interface ProviderEventCommon {
   readonly id: string;
   readonly updatedAt?: string;
@@ -65,6 +73,9 @@ interface ProviderEventCommon {
   readonly description?: string;
   readonly location?: string;
   readonly transparency: "opaque" | "transparent";
+  readonly type: ProviderEventType;
+  /** The signed-in person's own answer; absent when they are not an attendee. */
+  readonly selfResponse?: ProviderSelfResponse;
   readonly recurrence?: ProviderEventRecurrence;
 }
 

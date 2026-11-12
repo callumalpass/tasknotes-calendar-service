@@ -453,7 +453,10 @@ function tokenRowFaultDatabase(
   });
 }
 
-function calendarReadFaultDatabase(beforeRead?: () => Promise<void>): D1Database {
+function calendarReadFaultDatabase(
+  beforeRead?: () => Promise<void>,
+  corruption: Record<string, number> = {},
+): D1Database {
   const wrap = (statement: D1PreparedStatement): D1PreparedStatement =>
     new Proxy(statement, {
       get(target, property): unknown {
@@ -465,7 +468,7 @@ function calendarReadFaultDatabase(beforeRead?: () => Promise<void>): D1Database
             if (beforeRead !== undefined) return result;
             return {
               ...result,
-              results: result.results.map((row) => ({ ...row, is_primary: 2 })),
+              results: result.results.map((row) => ({ ...row, ...corruption })),
             };
           };
         }
@@ -1875,21 +1878,100 @@ describe("LiveGoogleCalendar with real D1", () => {
     });
   });
 
-  it("fails closed on corrupt persisted public calendar rows", async () => {
+  it("stores Google's colour, selection and the person's own name, and replaces them", async () => {
     await seed();
+    const item = { id: "provider", summary: "Shared", accessRole: "writerWithoutPrivateAccess" };
     const providerState = state({
       calendarResponses: [
-        json({ items: [{ id: "provider", summary: "Calendar", accessRole: "reader" }] }),
+        json({
+          items: [
+            { ...item, summaryOverride: "Mine", selected: true, backgroundColor: "#0088AA" },
+            { id: "plain", summary: "Plain", accessRole: "reader", backgroundColor: "teal" },
+          ],
+        }),
+        json({ items: [{ ...item, backgroundColor: "#ffffff" }] }),
       ],
     });
-    const db = calendarReadFaultDatabase();
-    await expectCode(
-      service(providerState, {
-        db,
-        accessTokens: accessTokens(testEnv.DB, provider(providerState)),
-      }).listCalendars(PRINCIPAL),
-      "internal",
-    );
+    const display = (calendars: Awaited<ReturnType<LiveGoogleCalendar["listCalendars"]>>) =>
+      calendars.calendars.map(({ name, can_write, is_selected, color }) => ({
+        name,
+        can_write,
+        is_selected,
+        color,
+      }));
+    expect(display(await service(providerState).listCalendars(PRINCIPAL))).toEqual([
+      { name: "Mine", can_write: true, is_selected: true, color: "#0088aa" },
+      { name: "Plain", can_write: false, is_selected: false, color: null },
+    ]);
+    const later = service(providerState, { db: clockDatabase(301), nowEpochSeconds: () => 1 });
+    expect(display(await later.listCalendars(PRINCIPAL))).toEqual([
+      { name: "Shared", can_write: true, is_selected: false, color: "#ffffff" },
+    ]);
+    expect(providerState.calendarCalls).toBe(2);
+  });
+
+  it.each([{ is_primary: 2 }, { is_selected: 2 }])(
+    "fails closed on a corrupt persisted public calendar row %j",
+    async (corruption) => {
+      await seed();
+      const providerState = state({
+        calendarResponses: [
+          json({ items: [{ id: "provider", summary: "Calendar", accessRole: "reader" }] }),
+        ],
+      });
+      await expectCode(
+        service(providerState, {
+          db: calendarReadFaultDatabase(undefined, corruption),
+          accessTokens: accessTokens(testEnv.DB, provider(providerState)),
+        }).listCalendars(PRINCIPAL),
+        "internal",
+      );
+    },
+  );
+
+  it("carries availability, the kind of entry and the person's own answer on live reads", async () => {
+    await seed({ calendar: true });
+    const base = {
+      status: "confirmed",
+      etag: '"1"',
+      updated: "2026-01-01T00:00:00Z",
+      start: { dateTime: "2026-01-02T10:00:00Z" },
+      end: { dateTime: "2026-01-02T11:00:00Z" },
+    };
+    const providerState = state({
+      eventResponses: [
+        json({
+          items: [
+            {
+              ...base,
+              id: "declined-private",
+              attendees: [{ self: true, responseStatus: "declined", email: "me@private.test" }],
+            },
+            {
+              ...base,
+              id: "office-private",
+              eventType: "workingLocation",
+              transparency: "transparent",
+            },
+            { ...base, id: "plain-private" },
+          ],
+        }),
+      ],
+    });
+    const page = await service(providerState).listEvents(PRINCIPAL, CALENDAR, RANGE);
+    expect(page.omitted_count).toBe(0);
+    expect(
+      page.events.map(({ transparency, event_type, self_response }) => ({
+        transparency,
+        event_type,
+        self_response,
+      })),
+    ).toEqual([
+      { transparency: "opaque", event_type: "default", self_response: "declined" },
+      { transparency: "transparent", event_type: "working_location", self_response: null },
+      { transparency: "opaque", event_type: "default", self_response: null },
+    ]);
+    expect(JSON.stringify(page)).not.toContain("private");
   });
 
   it.each([

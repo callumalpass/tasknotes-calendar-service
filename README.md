@@ -4,12 +4,13 @@ A provider-neutral calendar connection service for TaskNotes clients.
 
 A Google-only Cloudflare Worker with federated Google identity, encrypted server-side token custody,
 per-device sessions, calendar discovery, bounded and incremental event reads, and a stateless event
-write proxy. See [ADR 0005](docs/adr/0005-stateless-write-proxy.md).
+write proxy. See [ADR 0005](docs/adr/0005-stateless-write-proxy.md) and
+[ADR 0007](docs/adr/0007-event-display-fields-and-placement.md).
 
 Reads, writes, incremental changes, and sign-in confirmation passed a supervised live LAB run on
 2026-11-06; see [Google readiness](docs/google-readiness.md) for remaining gaps. Staging and
-production Workers are deployed, but the production Google project is in Testing, so only listed
-test users can sign in, and no public app build enables the calendar.
+production Workers are deployed. Google approved the production project in November 2026, and the
+production TaskNotes build reads `calendar.tasknotes.dev`.
 
 ## Local verification
 
@@ -82,8 +83,12 @@ pnpm migrations:production
 pnpm exec wrangler deploy --env production
 ```
 
-Deploy staging first. Passing it does not by itself approve a production deploy; the release gates
-in [ADR 0002](docs/adr/0002-testing-and-release-gates.md) still apply.
+Apply an environment's migrations before deploying a Worker that needs them. Deploy staging first.
+Passing it does not by itself approve a production deploy; the release gates in
+[ADR 0002](docs/adr/0002-testing-and-release-gates.md) still apply.
+
+Both Workers are pinned to `aws:us-east-1`, beside their D1 databases, because a request makes
+several queries. A response's `cf-placement` header shows where it ran. LAB is not pinned.
 
 See:
 

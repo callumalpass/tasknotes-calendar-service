@@ -5,8 +5,10 @@ import type {
   ProviderError,
   ProviderEvent,
   ProviderEventBoundary,
+  ProviderEventType,
   ProviderOutcome,
   ProviderPage,
+  ProviderSelfResponse,
   ProviderTimedBoundary,
 } from "./types";
 
@@ -28,6 +30,7 @@ const MAX_CALENDAR_NAME_CHARACTERS = 500;
 const MAX_CALENDAR_DESCRIPTION_CHARACTERS = 4_000;
 const MAX_CALENDAR_TIME_ZONE_CHARACTERS = 100;
 const PRINTABLE_PAGE_TOKEN_PATTERN = /^[\u0020-\u007e]+$/u;
+const CALENDAR_COLOR_PATTERN = /^#[0-9a-f]{6}$/iu;
 const MAX_RETRY_AFTER_SECONDS = 3_600;
 const MAX_EVENT_RANGE_MS = 93 * 24 * 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -511,18 +514,29 @@ function optionalText(
 function normalizeCalendar(value: unknown): ProviderCalendar | undefined {
   if (!isRecord(value)) return undefined;
   const id = boundedString(value["id"], MAX_ID_BYTES);
-  const name = optionalText(value["summary"], MAX_TITLE_BYTES, MAX_CALENDAR_NAME_CHARACTERS);
+  // A person's own name for a calendar is the one they recognise; an unusable one is ignored.
+  const own = optionalText(value["summaryOverride"], MAX_TITLE_BYTES, MAX_CALENDAR_NAME_CHARACTERS);
+  const name =
+    typeof own === "string" && own !== ""
+      ? own
+      : optionalText(value["summary"], MAX_TITLE_BYTES, MAX_CALENDAR_NAME_CHARACTERS);
   const description = optionalText(
     value["description"],
     MAX_DESCRIPTION_BYTES,
     MAX_CALENDAR_DESCRIPTION_CHARACTERS,
   );
   const zone = timeZone(value["timeZone"]);
+  const background = value["backgroundColor"];
+  // Display metadata: an unusable colour is dropped, not fatal.
+  const color =
+    typeof background === "string" && CALENDAR_COLOR_PATTERN.test(background)
+      ? background.toLowerCase()
+      : undefined;
   const role = value["accessRole"];
   const access =
     role === "reader" || role === "freeBusyReader"
       ? "reader"
-      : role === "writer"
+      : role === "writer" || role === "writerWithoutPrivateAccess"
         ? "writer"
         : role === "owner"
           ? "owner"
@@ -544,6 +558,7 @@ function normalizeCalendar(value: unknown): ProviderCalendar | undefined {
     access,
     primary: value["primary"] === true,
     selected: value["selected"] === true,
+    ...(color === undefined ? {} : { color }),
     ...(description === undefined ? {} : { description }),
     ...(zone === undefined ? {} : { timeZone: zone }),
   };
@@ -600,6 +615,35 @@ function boundaryBefore(left: ProviderEventBoundary, right: ProviderEventBoundar
     : Date.parse(left.dateTime) <= Date.parse((right as ProviderTimedBoundary).dateTime);
 }
 
+const EVENT_TYPES: Readonly<Record<string, ProviderEventType>> = {
+  default: "default",
+  focusTime: "focus_time",
+  outOfOffice: "out_of_office",
+  workingLocation: "working_location",
+  birthday: "birthday",
+  fromGmail: "from_gmail",
+};
+
+const SELF_RESPONSES: Readonly<Record<string, ProviderSelfResponse>> = {
+  accepted: "accepted",
+  declined: "declined",
+  tentative: "tentative",
+  needsAction: "needs_action",
+};
+
+/** Requests ask Google for at most the person's own attendee entry; no other attendee is read. */
+function selfResponse(value: unknown): ProviderSelfResponse | undefined {
+  if (!Array.isArray(value)) return undefined;
+  for (const attendee of value) {
+    if (!isRecord(attendee) || attendee["self"] !== true) continue;
+    const response = attendee["responseStatus"];
+    return typeof response === "string" && Object.hasOwn(SELF_RESPONSES, response)
+      ? SELF_RESPONSES[response]
+      : undefined;
+  }
+  return undefined;
+}
+
 function normalizeEvent(value: unknown, allowIdOnly = false): ProviderEvent | undefined {
   if (!isRecord(value)) return undefined;
   const id = boundedString(value["id"], 1024);
@@ -621,6 +665,13 @@ function normalizeEvent(value: unknown, allowIdOnly = false): ProviderEvent | un
       : value["transparency"] === "transparent"
         ? "transparent"
         : undefined;
+  const providerType = value["eventType"];
+  // A type Google adds later is still an event; it reads as an ordinary one.
+  const type =
+    typeof providerType === "string" && Object.hasOwn(EVENT_TYPES, providerType)
+      ? (EVENT_TYPES[providerType] ?? "default")
+      : "default";
+  const response = selfResponse(value["attendees"]);
   const recurringEventId =
     value["recurringEventId"] === undefined
       ? undefined
@@ -657,6 +708,8 @@ function normalizeEvent(value: unknown, allowIdOnly = false): ProviderEvent | un
     ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(etag === undefined ? {} : { etag }),
     transparency,
+    type,
+    ...(response === undefined ? {} : { selfResponse: response }),
     ...(title === undefined ? {} : { title }),
     ...(description === undefined ? {} : { description }),
     ...(location === undefined ? {} : { location }),
@@ -726,7 +779,7 @@ export async function listGoogleCalendarsPage(
   url.searchParams.set("maxResults", String(MAX_ITEMS));
   url.searchParams.set(
     "fields",
-    "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)",
+    "nextPageToken,items(id,summary,summaryOverride,description,timeZone,accessRole,primary,selected,backgroundColor)",
   );
   if (!addPageToken(url, request.pageToken))
     return failure("invalid_response", "Provider returned an invalid response.");
@@ -767,6 +820,7 @@ export async function listGoogleEventsPage(
   url.searchParams.set("orderBy", "startTime");
   url.searchParams.set("timeMin", request.timeMin);
   url.searchParams.set("timeMax", request.timeMax);
+  url.searchParams.set("maxAttendees", MAX_ATTENDEES);
   url.searchParams.set("fields", EVENTS_FIELDS);
   if (!addPageToken(url, request.pageToken))
     return failure("invalid_response", "Provider returned an invalid response.");
@@ -781,7 +835,9 @@ export async function listGoogleEventsPage(
 }
 
 const EVENT_FIELDS =
-  "id,etag,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone)";
+  "id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone)";
+/** With more attendees than this, Google returns only the person's own entry. */
+const MAX_ATTENDEES = "1";
 const EVENTS_FIELDS = `nextPageToken,items(${EVENT_FIELDS})`;
 
 export interface GoogleChangesListRequest extends GoogleRequestOptions {
@@ -801,6 +857,7 @@ export async function listGoogleChangesPage(
   url.searchParams.set("maxResults", String(MAX_ITEMS));
   url.searchParams.set("showDeleted", "true");
   url.searchParams.set("singleEvents", "false");
+  url.searchParams.set("maxAttendees", MAX_ATTENDEES);
   url.searchParams.set("fields", `nextSyncToken,${EVENTS_FIELDS}`);
   if (request.syncToken !== undefined) {
     if (!validPageToken(request.syncToken)) return invalidRequest();
@@ -842,7 +899,10 @@ export async function requestGoogleEvent(
     request.method === "POST" ? path : `${path}/${encodeURIComponent(request.eventId)}`,
     configuration(request).calendarApiOrigin,
   );
-  if (request.method !== "DELETE") url.searchParams.set("fields", EVENT_FIELDS);
+  if (request.method !== "DELETE") {
+    url.searchParams.set("fields", EVENT_FIELDS);
+    url.searchParams.set("maxAttendees", MAX_ATTENDEES);
+  }
   if (request.method !== "GET") url.searchParams.set("sendUpdates", "none");
   const headers = bearer(request.accessToken);
   if (request.ifMatch !== undefined) headers.set("If-Match", request.ifMatch);

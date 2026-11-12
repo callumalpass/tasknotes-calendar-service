@@ -17,9 +17,9 @@ const MAX_VALUE_BYTES = 2_048;
 const MAX_ITEMS = 250;
 const MAX_PAGE_TOKEN_BYTES = 1_024;
 const CALENDAR_LIST_FIELDS =
-  "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)";
+  "nextPageToken,items(id,summary,summaryOverride,description,timeZone,accessRole,primary,selected,backgroundColor)";
 const EVENTS_FIELDS =
-  "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))";
+  "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))";
 const STATIC_ACCESS_TOKEN = "fake-access";
 const INITIAL_REFRESH_TOKEN = "fake-refresh-token-000000000000000000001";
 const encoder = new TextEncoder();
@@ -676,7 +676,10 @@ async function calendar(request: Request, url: URL): Promise<Response> {
     const fields = EVENTS_FIELDS.slice("nextPageToken,items(".length, -1);
     if (request.method !== "GET" && url.searchParams.get("sendUpdates") !== "none")
       return reject(400);
-    if (request.method !== "DELETE" && url.searchParams.get("fields") !== fields)
+    if (
+      request.method !== "DELETE" &&
+      (url.searchParams.get("fields") !== fields || url.searchParams.get("maxAttendees") !== "1")
+    )
       return reject(400);
     let event = pages.flatMap((page) => page.items).find((item) => item["id"] === providerId);
     if (request.method === "POST") {
@@ -753,6 +756,7 @@ async function calendar(request: Request, url: URL): Promise<Response> {
   const names = [
     "maxResults",
     "singleEvents",
+    "maxAttendees",
     "fields",
     ...(pageToken === null ? [] : ["pageToken"]),
     ...(changes
@@ -763,6 +767,7 @@ async function calendar(request: Request, url: URL): Promise<Response> {
     !exactParameters(url.searchParams, names) ||
     url.searchParams.get("maxResults") !== "250" ||
     url.searchParams.get("singleEvents") !== (changes ? "false" : "true") ||
+    url.searchParams.get("maxAttendees") !== "1" ||
     url.searchParams.get("fields") !== (changes ? `nextSyncToken,${EVENTS_FIELDS}` : EVENTS_FIELDS)
   )
     return reject(400);
@@ -837,11 +842,13 @@ function validCalendarItem(value: unknown): value is Record<string, unknown> {
     !recordWithKeys(value, [
       "id",
       "summary",
+      "summaryOverride",
       "description",
       "timeZone",
       "accessRole",
       "primary",
       "selected",
+      "backgroundColor",
     ])
   )
     return false;
@@ -851,7 +858,11 @@ function validCalendarItem(value: unknown): value is Record<string, unknown> {
     encoder.encode(value["summary"]).byteLength <= 2_048 &&
     optionalString(value["description"], 32_768) &&
     optionalString(value["timeZone"], 256) &&
-    ["freeBusyReader", "reader", "writer", "owner"].includes(String(value["accessRole"])) &&
+    optionalString(value["summaryOverride"], 2_048) &&
+    optionalString(value["backgroundColor"], 64) &&
+    ["freeBusyReader", "reader", "writerWithoutPrivateAccess", "writer", "owner"].includes(
+      String(value["accessRole"]),
+    ) &&
     (value["primary"] === undefined || typeof value["primary"] === "boolean") &&
     (value["selected"] === undefined || typeof value["selected"] === "boolean")
   );
@@ -868,6 +879,8 @@ function validEventItem(value: unknown): value is Record<string, unknown> {
       "description",
       "location",
       "transparency",
+      "eventType",
+      "attendees",
       "start",
       "end",
       "recurringEventId",
@@ -884,6 +897,8 @@ function validEventItem(value: unknown): value is Record<string, unknown> {
     optionalString(value["description"], 32_768) &&
     optionalString(value["location"], 8_192) &&
     optionalString(value["recurringEventId"], 4_096) &&
+    optionalString(value["eventType"], 64) &&
+    (value["attendees"] === undefined || Array.isArray(value["attendees"])) &&
     (value["transparency"] === undefined ||
       value["transparency"] === "opaque" ||
       value["transparency"] === "transparent") &&

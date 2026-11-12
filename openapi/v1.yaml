@@ -687,15 +687,27 @@ components:
     Calendar:
       type: object
       additionalProperties: false
-      required: [id, connection_id, name, description, can_write, time_zone, is_primary]
+      required:
+        [id, connection_id, name, description, can_write, time_zone, is_primary, is_selected, color]
       properties:
         id: { type: string, format: uuid }
         connection_id: { type: string, format: uuid }
-        name: { type: string, minLength: 1, maxLength: 500 }
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: The person's own name for the calendar when they have set one.
         description: { type: [string, "null"], maxLength: 4000 }
         can_write: { type: boolean }
         time_zone: { type: [string, "null"], maxLength: 100 }
         is_primary: { type: boolean }
+        is_selected:
+          type: boolean
+          description: Whether the person shows this calendar in the provider's own interface.
+        color:
+          type: [string, "null"]
+          pattern: "^#[0-9a-f]{6}$"
+          description: The provider's display colour for the calendar, when it gives a usable one.
     EventId:
       type: string
       pattern: "^e1_[A-Za-z0-9_-]{39,1403}$"
@@ -778,6 +790,19 @@ components:
             description: Opaque deterministic series identifier.,
           }
         original_start: { $ref: "#/components/schemas/EventBoundary" }
+    EventTransparency:
+      enum: [opaque, transparent]
+      description: Whether the event blocks time. A tombstone reads as opaque.
+    EventType:
+      enum: [default, focus_time, out_of_office, working_location, birthday, from_gmail]
+      description:
+        The kind of entry. A provider kind this contract does not name reads as default, as does a
+        tombstone.
+    EventSelfResponse:
+      enum: [accepted, declined, tentative, needs_action, null]
+      description:
+        The signed-in person's own answer to an invitation, or null when they are not an attendee.
+        No other attendee is read.
     Event:
       description:
         Provider-neutral event with opaque deterministic identifiers. Boundary kinds match and every
@@ -803,6 +828,9 @@ components:
           end,
           updated_at,
           recurrence,
+          transparency,
+          event_type,
+          self_response,
         ]
       properties:
         id:
@@ -820,6 +848,9 @@ components:
         end: { $ref: "#/components/schemas/EventBoundary" }
         updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
+        transparency: { $ref: "#/components/schemas/EventTransparency" }
+        event_type: { $ref: "#/components/schemas/EventType" }
+        self_response: { $ref: "#/components/schemas/EventSelfResponse" }
     TentativeEvent:
       type: object
       additionalProperties: false
@@ -836,6 +867,9 @@ components:
           end,
           updated_at,
           recurrence,
+          transparency,
+          event_type,
+          self_response,
         ]
       properties:
         id:
@@ -853,6 +887,9 @@ components:
         end: { $ref: "#/components/schemas/EventBoundary" }
         updated_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
+        transparency: { $ref: "#/components/schemas/EventTransparency" }
+        event_type: { $ref: "#/components/schemas/EventType" }
+        self_response: { $ref: "#/components/schemas/EventSelfResponse" }
     CancelledEvent:
       description: Tombstone with either a complete valid interval or two null boundaries.
       oneOf:
@@ -874,6 +911,9 @@ components:
           end,
           updated_at,
           recurrence,
+          transparency,
+          event_type,
+          self_response,
         ]
       properties:
         id:
@@ -891,6 +931,9 @@ components:
         end: { $ref: "#/components/schemas/EventBoundary" }
         updated_at: { oneOf: [{ $ref: "#/components/schemas/Rfc3339Instant" }, { type: "null" }] }
         recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
+        transparency: { $ref: "#/components/schemas/EventTransparency" }
+        event_type: { $ref: "#/components/schemas/EventType" }
+        self_response: { $ref: "#/components/schemas/EventSelfResponse" }
     CancelledEventWithoutInterval:
       type: object
       additionalProperties: false
@@ -907,6 +950,9 @@ components:
           end,
           updated_at,
           recurrence,
+          transparency,
+          event_type,
+          self_response,
         ]
       properties:
         id:
@@ -924,6 +970,9 @@ components:
         end: { type: "null" }
         updated_at: { oneOf: [{ $ref: "#/components/schemas/Rfc3339Instant" }, { type: "null" }] }
         recurrence: { oneOf: [{ $ref: "#/components/schemas/EventRecurrence" }, { type: "null" }] }
+        transparency: { $ref: "#/components/schemas/EventTransparency" }
+        event_type: { $ref: "#/components/schemas/EventType" }
+        self_response: { $ref: "#/components/schemas/EventSelfResponse" }
     Device:
       type: object
       additionalProperties: false

@@ -53,6 +53,21 @@ describe("OpenAPI and runtime contract", () => {
     expect(spec).toContain("{21}[AQgw]");
   });
 
+  it("documents calendar display data and the event display fields on every variant", () => {
+    for (const field of ["transparency", "event_type", "self_response"]) {
+      expect(spec.match(new RegExp(`^ {8}${field}: \\{ \\$ref: `, "gm"))).toHaveLength(4);
+      expect(spec.match(new RegExp(`^ {10}${field},$`, "gm"))).toHaveLength(4);
+    }
+    expect(spec).toContain("enum: [opaque, transparent]");
+    expect(spec).toContain(
+      "enum: [default, focus_time, out_of_office, working_location, birthday, from_gmail]",
+    );
+    expect(spec).toContain("enum: [accepted, declined, tentative, needs_action, null]");
+    expect(spec).toContain("No other attendee is read.");
+    expect(spec).toContain('pattern: "^#[0-9a-f]{6}$"');
+    expect(spec).toContain("can_write, time_zone, is_primary, is_selected, color]");
+  });
+
   it("documents the strict status union, opaque recurrence IDs, and tombstone pair variants", () => {
     expect(spec).toMatch(
       /Event:\n(?:.|\n)*?oneOf:\n\s+- \$ref: "#\/components\/schemas\/ConfirmedEvent"\n\s+- \$ref: "#\/components\/schemas\/TentativeEvent"\n\s+- \$ref: "#\/components\/schemas\/CancelledEvent"/u,
