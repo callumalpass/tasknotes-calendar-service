@@ -9,7 +9,8 @@ const bound = env as unknown as Env;
 function configuration(overrides: Partial<Env>): Env {
   return {
     DB: bound.DB,
-    API_RATE_LIMITER: bound.API_RATE_LIMITER,
+    IP_RATE_LIMITER: bound.IP_RATE_LIMITER,
+    PRINCIPAL_RATE_LIMITER: bound.PRINCIPAL_RATE_LIMITER,
     ALLOWED_ORIGINS: "",
     ENVIRONMENT: "local",
     PUBLIC_ORIGIN: "http://127.0.0.1:8787",

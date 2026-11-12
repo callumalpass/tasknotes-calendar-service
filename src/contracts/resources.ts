@@ -49,6 +49,11 @@ export const CalendarSchema = z.strictObject({
   can_write: z.boolean(),
   time_zone: boundedCodePointText(100, false).nullable(),
   is_primary: z.boolean(),
+  is_selected: z.boolean(),
+  color: z
+    .string()
+    .regex(/^#[0-9a-f]{6}$/u)
+    .nullable(),
 });
 
 export const CalendarsResponseSchema = z.strictObject({
@@ -121,6 +126,16 @@ const eventCommonShape = {
   location: eventTextSchema(1000).nullable(),
   updated_at: Rfc3339InstantSchema.nullable(),
   recurrence: EventRecurrenceSchema.nullable(),
+  transparency: z.enum(["opaque", "transparent"]),
+  event_type: z.enum([
+    "default",
+    "focus_time",
+    "out_of_office",
+    "working_location",
+    "birthday",
+    "from_gmail",
+  ]),
+  self_response: z.enum(["accepted", "declined", "tentative", "needs_action"]).nullable(),
 } as const;
 
 const ConfirmedEventSchema = z.strictObject({

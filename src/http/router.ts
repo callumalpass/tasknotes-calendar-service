@@ -241,13 +241,19 @@ function endsOwnSession(
   );
 }
 
+/** Sign-in is limited per address; a signed-in person has their own, larger allowance. */
+export interface RateLimiters {
+  readonly ip: RateLimit;
+  readonly principal: RateLimit;
+}
+
 async function dispatch(
   route: CompiledRoute,
   match: RegExpExecArray,
   request: Request,
   handlers: RouteHandlers,
   authentication: RouterAuthentication,
-  rateLimiter: RateLimit,
+  rateLimiters: RateLimiters,
   originAllowed: boolean,
   ctx: ExecutionContext,
 ): Promise<Response> {
@@ -261,7 +267,7 @@ async function dispatch(
         : `principal:${authenticated.principalId}`;
     let success: boolean;
     try {
-      ({ success } = await rateLimiter.limit({ key }));
+      ({ success } = await rateLimiters[route.definition.rateLimit].limit({ key }));
     } catch {
       // Fail closed: an unavailable abuse boundary must not expose unbounded OAuth/provider work.
       throw new ContractError("dependency_unavailable", 60);
@@ -319,7 +325,7 @@ export function createRouter(
   handlers: RouteHandlers,
   authentication: RouterAuthentication,
   policy: {
-    readonly rateLimiter: RateLimit;
+    readonly rateLimiters: RateLimiters;
     readonly allowedOrigins: () => readonly string[];
     readonly publicOrigin: () => string;
   },
@@ -376,7 +382,7 @@ export function createRouter(
           request,
           handlers,
           authentication,
-          policy.rateLimiter,
+          policy.rateLimiters,
           allowedOrigin !== undefined,
           ctx,
         );

@@ -38,6 +38,9 @@ export async function mapProviderEvents(
           description: event.description ?? null,
           location: event.location ?? null,
           updated_at: event.updatedAt ?? null,
+          transparency: event.transparency,
+          event_type: event.type,
+          self_response: event.selfResponse ?? null,
           recurrence:
             event.recurrence === undefined
               ? null

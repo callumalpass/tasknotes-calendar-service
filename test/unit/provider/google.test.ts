@@ -6,6 +6,7 @@ import {
   listGoogleCalendarsPage,
   listGoogleEventsPage,
   refreshGoogleToken,
+  requestGoogleEvent,
   revokeGoogleTokenBestEffort,
 } from "../../../src/provider/google";
 
@@ -232,7 +233,7 @@ describe("Google provider HTTP boundary", () => {
     expect(requested?.searchParams.get("pageToken")).toBe("opaque+/=?& token");
     expect(requested?.searchParams.get("maxResults")).toBe("250");
     expect(requested?.searchParams.get("fields")).toBe(
-      "nextPageToken,items(id,summary,description,timeZone,accessRole,primary,selected)",
+      "nextPageToken,items(id,summary,summaryOverride,description,timeZone,accessRole,primary,selected,backgroundColor)",
     );
     for (const excluded of ["etag", "conferenceProperties", "notificationSettings"]) {
       expect(requested?.searchParams.get("fields")).not.toContain(excluded);
@@ -311,10 +312,14 @@ describe("Google provider HTTP boundary", () => {
     expect(requested?.searchParams.get("showDeleted")).toBeNull();
     expect(requested?.searchParams.get("orderBy")).toBe("startTime");
     expect(requested?.searchParams.get("fields")).toBe(
-      "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
+      "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
     );
+    // Only the person's own entry, and of it only whether it is theirs and their answer.
+    expect(requested?.searchParams.get("maxAttendees")).toBe("1");
     for (const excluded of [
-      "attendees",
+      "email",
+      "displayName",
+      "comment",
       "organizer",
       "conferenceData",
       "htmlLink",
@@ -334,6 +339,7 @@ describe("Google provider HTTP boundary", () => {
       description: "description",
       location: "location",
       transparency: "transparent",
+      type: "default",
       start: {
         kind: "timed",
         dateTime: "2026-03-29T00:30:00Z",
@@ -349,6 +355,146 @@ describe("Google provider HTTP boundary", () => {
     for (const excluded of ["attendees", "organizer", "conference", "htmlLink", "RRULE"]) {
       expect(serialized).not.toContain(excluded);
     }
+  });
+
+  it.each([
+    ["accepted", "accepted"],
+    ["declined", "declined"],
+    ["tentative", "tentative"],
+    ["needsAction", "needs_action"],
+    ["maybe", undefined],
+    [7, undefined],
+    [undefined, undefined],
+  ] as const)("reads the person's own answer %s as %s", async (responseStatus, expected) => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            {
+              ...timedEvent,
+              attendees: [
+                { responseStatus: "declined", email: "other@example.test" },
+                { self: true, responseStatus, email: "private@example.test" },
+              ],
+            },
+          ],
+        }),
+      ),
+    });
+    if (!result.ok) throw new Error("expected successful event page");
+    expect(result.value.omittedCount).toBe(0);
+    expect(result.value.items[0]?.selfResponse).toBe(expected);
+    expect(JSON.stringify(result.value)).not.toContain("example.test");
+  });
+
+  it.each([{}, "declined", [null, "declined", { self: "true", responseStatus: "declined" }]])(
+    "reads no answer from attendee data %j that names no entry as the person's own",
+    async (attendees) => {
+      const result = await listGoogleEventsPage({
+        ...eventsRequest,
+        fetch: fakeFetch(() => json({ items: [{ ...timedEvent, attendees }] })),
+      });
+      if (!result.ok) throw new Error("expected successful event page");
+      expect(result.value.items).toHaveLength(1);
+      expect(result.value.items[0]).not.toHaveProperty("selfResponse");
+    },
+  );
+
+  it.each([
+    ["default", "default"],
+    ["focusTime", "focus_time"],
+    ["outOfOffice", "out_of_office"],
+    ["workingLocation", "working_location"],
+    ["birthday", "birthday"],
+    ["fromGmail", "from_gmail"],
+    ["somethingNew", "default"],
+    ["constructor", "default"],
+    [42, "default"],
+    [undefined, "default"],
+  ] as const)("reads Google event type %s as %s", async (eventType, expected) => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() => json({ items: [{ ...timedEvent, eventType }] })),
+    });
+    if (!result.ok) throw new Error("expected successful event page");
+    expect(result.value.items[0]?.type).toBe(expected);
+  });
+
+  it("asks for the person's own answer on single-event reads and writes, never on delete", async () => {
+    const seen: URL[] = [];
+    const fetch = fakeFetch((url, init) => {
+      seen.push(url);
+      return init?.method === "DELETE" ? new Response(null, { status: 204 }) : json(timedEvent);
+    });
+    const base = {
+      configuration: testConfiguration,
+      accessToken: "access-secret",
+      calendarId: "calendar",
+      eventId: "event-1",
+      fetch,
+    };
+    for (const method of ["GET", "POST", "PATCH", "DELETE"] as const) {
+      await requestGoogleEvent({
+        ...base,
+        method,
+        ...(method === "POST" || method === "PATCH" ? { body: { summary: "x" } } : {}),
+      });
+    }
+    expect(seen.map((url) => url.searchParams.get("maxAttendees"))).toEqual(["1", "1", "1", null]);
+    expect(seen.map((url) => url.searchParams.get("fields")?.includes("attendees(self,"))).toEqual([
+      true,
+      true,
+      true,
+      undefined,
+    ]);
+  });
+
+  it("uses the person's own calendar name and keeps only a plain hex colour", async () => {
+    const result = await listGoogleCalendarsPage({
+      configuration: testConfiguration,
+      accessToken: "access",
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            { ...calendar, id: "a", summaryOverride: "Mine", backgroundColor: "#0088AA" },
+            { ...calendar, id: "b", summaryOverride: "", backgroundColor: "red" },
+            { ...calendar, id: "c", backgroundColor: "#0088aa; background: url(x)" },
+            { ...calendar, id: "d", backgroundColor: 255, selected: false },
+            { ...calendar, id: "e", accessRole: "writerWithoutPrivateAccess" },
+            { ...calendar, id: "f", summaryOverride: "😀".repeat(501) },
+            { ...calendar, id: "g", summaryOverride: 7 },
+          ],
+        }),
+      ),
+    });
+    if (!result.ok) throw new Error("expected successful calendar page");
+    expect(
+      result.value.items.map(({ id, name, color, selected, access }) => ({
+        id,
+        name,
+        color,
+        selected,
+        access,
+      })),
+    ).toEqual([
+      { id: "a", name: "Mine", color: "#0088aa", selected: true, access: "owner" },
+      { id: "b", name: calendar.summary, color: undefined, selected: true, access: "owner" },
+      { id: "c", name: calendar.summary, color: undefined, selected: true, access: "owner" },
+      { id: "d", name: calendar.summary, color: undefined, selected: false, access: "owner" },
+      { id: "e", name: calendar.summary, color: undefined, selected: true, access: "writer" },
+      { id: "f", name: calendar.summary, color: undefined, selected: true, access: "owner" },
+      { id: "g", name: calendar.summary, color: undefined, selected: true, access: "owner" },
+    ]);
+  });
+
+  it("rejects a calendar whose access it cannot classify", async () => {
+    const result = await listGoogleCalendarsPage({
+      configuration: testConfiguration,
+      accessToken: "access",
+      fetch: fakeFetch(() => json({ items: [{ ...calendar, accessRole: "none" }] })),
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
   });
 
   it("preserves exclusive all-day ends and recurrence-instance original starts", async () => {

@@ -19,7 +19,7 @@ function router(env: Env): ReturnType<typeof createRouter> {
           (await runtimeConfiguration(env)).deviceSessions.authenticate(credential),
       },
       {
-        rateLimiter: env.API_RATE_LIMITER,
+        rateLimiters: { ip: env.IP_RATE_LIMITER, principal: env.PRINCIPAL_RATE_LIMITER },
         allowedOrigins: () => allowedOriginsFromEnvironment(env),
         publicOrigin: () => publicOriginFromEnvironment(env),
       },

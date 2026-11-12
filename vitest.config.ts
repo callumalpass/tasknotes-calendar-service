@@ -24,7 +24,11 @@ export default defineConfig({
       },
       miniflare: {
         ratelimits: {
-          API_RATE_LIMITER: { namespace_id: "1001", simple: { limit: 1_000_000, period: 60 } },
+          IP_RATE_LIMITER: { namespace_id: "1001", simple: { limit: 1_000_000, period: 60 } },
+          PRINCIPAL_RATE_LIMITER: {
+            namespace_id: "1011",
+            simple: { limit: 1_000_000, period: 60 },
+          },
           TEST_RATE_LIMITER: { namespace_id: "1003", simple: { limit: 1, period: 60 } },
         },
         bindings: {

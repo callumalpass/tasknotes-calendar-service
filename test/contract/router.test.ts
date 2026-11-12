@@ -109,7 +109,10 @@ function router(
   authentication: RouterAuthentication = successfulAuthentication(),
 ): (request: Request) => Promise<Response> {
   const dispatch = createRouter(routeHandlers, authentication, {
-    rateLimiter: (env as unknown as Env).API_RATE_LIMITER,
+    rateLimiters: {
+      ip: (env as unknown as Env).IP_RATE_LIMITER,
+      principal: (env as unknown as Env).PRINCIPAL_RATE_LIMITER,
+    },
     allowedOrigins: () => [],
     publicOrigin: () => "https://calendar.test",
   });
@@ -250,6 +253,9 @@ describe("contract router", () => {
       end: { kind: "date", date: "2026-11-06" },
       updated_at: instant,
       recurrence: null,
+      transparency: "opaque",
+      event_type: "default",
+      self_response: null,
     };
     const patch = vi.fn<RouteHandler>(() => Promise.resolve(event));
     const remove = vi.fn<RouteHandler>(() => Promise.resolve(undefined));
@@ -668,6 +674,9 @@ describe("contract router", () => {
       end: null,
       updated_at: instant,
       recurrence: null,
+      transparency: "opaque",
+      event_type: "default",
+      self_response: null,
     };
     const valid = await router(
       handlers({

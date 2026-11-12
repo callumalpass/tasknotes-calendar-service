@@ -297,10 +297,10 @@ export class GoogleAccessTokens {
     )
       return failure("internal");
     try {
-      const databaseNow = await this.#databaseNow();
+      // The snapshot carries the database clock it was read under, a moment ago.
       if (
         !options.forceRefresh &&
-        state.payload.expiresAtEpochSeconds > databaseNow + FRESHNESS_SKEW_SECONDS
+        state.payload.expiresAtEpochSeconds > state.row.database_now + FRESHNESS_SKEW_SECONDS
       )
         return this.#grant(state.row, state.payload.accessToken);
       return await this.#refresh(state.row, state.payload);
