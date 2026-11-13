@@ -58,7 +58,6 @@ export const SessionCredentialSchema = z.strictObject({
   credential: ServiceCredentialSchema,
   session_id: DeviceSessionIdSchema,
   idle_expires_at: Rfc3339InstantSchema,
-  absolute_expires_at: Rfc3339InstantSchema,
 });
 
 export const SignInRedeemResponseSchema = z.strictObject({ session: SessionCredentialSchema });

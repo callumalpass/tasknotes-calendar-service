@@ -112,10 +112,9 @@ describe("hourly D1 retention", () => {
 
   it("deletes revoked and expired sessions and old fences, preserving live authority", async () => {
     for (const [id, idle, absolute, revoked] of [
-      ["live", 600, 1200, null],
+      ["live", 600, 600, null],
       ["revoked", 600, 1200, 1],
       ["idle", -1, 1200, null],
-      ["absolute", -10, -1, null],
     ] as const) {
       await db
         .prepare(

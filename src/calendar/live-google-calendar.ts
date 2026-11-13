@@ -9,6 +9,7 @@ import type {
   EventsResponse,
 } from "../contracts";
 import { canonicalUuid } from "../contracts/common";
+import { MAX_CALENDARS } from "../contracts/resources";
 import {
   GoogleAccessTokenError,
   type AccessGrant,
@@ -42,6 +43,9 @@ import type {
 const LEASE_SECONDS = 45;
 const LOSER_DELAYS_MS = [50, 100, 200, 400, 800] as const;
 const RETRY_AFTER_SECONDS = 1;
+const PROVIDER_PAGE_SIZE = 250;
+// As many provider pages as the calendars response can carry. Their timeouts fit the lease.
+const MAX_DISCOVERY_PAGES = MAX_CALENDARS / PROVIDER_PAGE_SIZE;
 
 export type LiveGoogleCalendarErrorCode =
   | "permission_denied"
@@ -57,14 +61,32 @@ export type LiveGoogleCalendarErrorCode =
 export class LiveGoogleCalendarError extends Error {
   public readonly code: LiveGoogleCalendarErrorCode;
   public readonly retryAfterSeconds?: number;
+  /** For the request log: the provider or token failure behind this one, as a stable code. */
+  public readonly detail?: string;
 
-  public constructor(code: LiveGoogleCalendarErrorCode, retryAfterSeconds?: number) {
+  public constructor(
+    code: LiveGoogleCalendarErrorCode,
+    retryAfterSeconds?: number,
+    detail?: string,
+  ) {
     super("Live calendar operation failed.");
     this.name = "LiveGoogleCalendarError";
     this.code = code;
     if (retryAfterSeconds !== undefined) this.retryAfterSeconds = retryAfterSeconds;
+    if (detail !== undefined) this.detail = detail;
     Object.freeze(this);
   }
+}
+
+export interface CalendarList {
+  calendars: Calendar[];
+  /** Present when this request asked the provider, rather than answering from stored mappings. */
+  discovery?: {
+    /** Provider calendars the service cannot represent, left out of the list. */
+    omittedCount: number;
+    /** The provider had more calendars than the service lists. */
+    truncated: boolean;
+  };
 }
 
 export interface LiveGoogleCalendarDependencies {
@@ -126,8 +148,12 @@ interface DiscoveryAuthority {
   readonly discoveryVersion: number;
 }
 
-function fail(code: LiveGoogleCalendarErrorCode, retryAfterSeconds?: number): never {
-  throw new LiveGoogleCalendarError(code, retryAfterSeconds);
+function fail(
+  code: LiveGoogleCalendarErrorCode,
+  retryAfterSeconds?: number,
+  detail?: string,
+): never {
+  throw new LiveGoogleCalendarError(code, retryAfterSeconds, detail);
 }
 
 function now(dependencies: LiveGoogleCalendarDependencies): number {
@@ -192,7 +218,7 @@ export class LiveGoogleCalendar {
     this.#dependencies = dependencies;
   }
 
-  public async listCalendars(authenticatedPrincipalId: string): Promise<{ calendars: Calendar[] }> {
+  public async listCalendars(authenticatedPrincipalId: string): Promise<CalendarList> {
     if (canonicalUuid(authenticatedPrincipalId) === undefined) fail("internal");
     const cached = await this.#discoveryRow(authenticatedPrincipalId);
     if (
@@ -269,7 +295,7 @@ export class LiveGoogleCalendar {
     if (canonicalUuid(authenticatedPrincipalId) === undefined) fail("internal");
     if (canonicalUuid(publicCalendarId) === undefined) fail("internal");
     const resolved = await this.#eventGrant(authenticatedPrincipalId, publicCalendarId);
-    if (resolved === null) return fail("not_found");
+    if (resolved === null) return this.#absentGrant(authenticatedPrincipalId, publicCalendarId);
     const expected = authority(resolved);
     let pageToken: string | undefined;
     if (query.cursor !== undefined) {
@@ -298,7 +324,8 @@ export class LiveGoogleCalendar {
         eventIdKey: this.#dependencies.eventIdKey,
       });
     } catch (error) {
-      if (error instanceof EventMappingError) return fail("unavailable");
+      if (error instanceof EventMappingError)
+        return fail("unavailable", undefined, "event_mapping");
       return fail("internal");
     }
     let nextCursor: string | null = null;
@@ -380,7 +407,7 @@ export class LiveGoogleCalendar {
     query: ChangesQuery,
   ): Promise<ChangesResponse> {
     const resolved = await this.#eventGrant(principalId, calendarId);
-    if (resolved === null) return fail("not_found");
+    if (resolved === null) return this.#absentGrant(principalId, calendarId);
     const binding = {
       principalId,
       connectionId: resolved.id,
@@ -456,7 +483,7 @@ export class LiveGoogleCalendar {
     ifMatch?: string,
   ): Promise<CalendarEvent | undefined> {
     const resolved = await this.#eventGrant(principalId, calendarId);
-    if (resolved === null) return fail("not_found");
+    if (resolved === null) return this.#absentGrant(principalId, calendarId);
     const binding = this.#eventBinding(calendarId);
     let providerId: string;
     if (method === "POST") {
@@ -625,6 +652,31 @@ export class LiveGoogleCalendar {
     }
   }
 
+  /**
+   * Why a request found no grant. The person's own calendar whose access lapsed says so; every
+   * other absence, another principal's calendar included, reads as no such calendar.
+   */
+  async #absentGrant(principalId: string, calendarId: string): Promise<never> {
+    let lapsed: unknown;
+    try {
+      lapsed = await this.#dependencies.db
+        .prepare(
+          `SELECT 1 FROM calendars AS calendar
+           JOIN connections AS connection ON connection.id = calendar.connection_id
+             AND connection.principal_id = calendar.principal_id
+             AND connection.provider = 'google' AND connection.status = 'reconnect_required'
+           JOIN principals AS principal ON principal.id = connection.principal_id
+             AND principal.google_connection_generation = connection.generation
+           WHERE calendar.id = ? AND calendar.principal_id = ? LIMIT 1`,
+        )
+        .bind(calendarId, principalId)
+        .first();
+    } catch {
+      return fail("internal");
+    }
+    return lapsed === null ? fail("not_found") : fail("reconnect", undefined, "connection_lapsed");
+  }
+
   async #acquire(expected: DiscoveryAuthority, owner: string): Promise<boolean> {
     const statement = this.#dependencies.db
       .prepare(
@@ -674,11 +726,16 @@ export class LiveGoogleCalendar {
     initialGrant: AccessGrant,
     owner: string,
     retriedUnauthorized: boolean,
-  ): Promise<{ calendars: Calendar[] }> {
+    pageToken?: string,
+    page = 1,
+    found: readonly ProviderCalendar[] = [],
+    omitted = 0,
+  ): Promise<CalendarList> {
     let result;
     try {
       result = await listGoogleCalendarsPage({
         accessToken: initialGrant.accessToken,
+        ...(pageToken === undefined ? {} : { pageToken }),
         configuration: this.#dependencies.googleProvider,
         fetch: this.#dependencies.fetch,
         ...(this.#dependencies.providerTimeoutMs === undefined
@@ -689,6 +746,7 @@ export class LiveGoogleCalendar {
       await this.#release(expected, owner);
       return fail("unavailable");
     }
+    // A refused token restarts the whole list under the refreshed one.
     if (!result.ok && result.error.code === "unauthorized" && !retriedUnauthorized) {
       await this.#release(expected, owner);
       let refreshed: AccessGrant;
@@ -714,11 +772,25 @@ export class LiveGoogleCalendar {
       await this.#release(expected, owner);
       return this.#discoveryProviderFailure(result.error);
     }
-    if (result.value.nextPageToken !== undefined) {
-      await this.#release(expected, owner);
-      return fail("conflict");
-    }
-    return { calendars: await this.#commitDiscovery(expected, owner, result.value.items) };
+    const calendars = [...found, ...result.value.items];
+    const omittedCount = omitted + (result.value.omittedCount ?? 0);
+    const next = result.value.nextPageToken;
+    // Mappings are replaced only by a list read to its end, or to the bound, under one lease.
+    if (next !== undefined && page < MAX_DISCOVERY_PAGES)
+      return this.#discoverAsOwner(
+        expected,
+        initialGrant,
+        owner,
+        retriedUnauthorized,
+        next,
+        page + 1,
+        calendars,
+        omittedCount,
+      );
+    return {
+      calendars: await this.#commitDiscovery(expected, owner, calendars),
+      discovery: { omittedCount, truncated: next !== undefined },
+    };
   }
 
   async #release(expected: DiscoveryAuthority, owner: string): Promise<void> {
@@ -794,7 +866,8 @@ export class LiveGoogleCalendar {
       }
     }
     const statements: D1PreparedStatement[] = [];
-    if (candidates.length > 0) {
+    // One statement per provider page keeps each bound value within D1's size limit.
+    for (let offset = 0; offset < candidates.length; offset += PROVIDER_PAGE_SIZE) {
       statements.push(
         this.#dependencies.db
           .prepare(
@@ -835,7 +908,7 @@ export class LiveGoogleCalendar {
              WHERE calendars.principal_id = excluded.principal_id`,
           )
           .bind(
-            JSON.stringify(candidates),
+            JSON.stringify(candidates.slice(offset, offset + PROVIDER_PAGE_SIZE)),
             expected.principalId,
             expected.connectionId,
             expected.connectionId,
@@ -1018,28 +1091,33 @@ export class LiveGoogleCalendar {
   }
 
   #discoveryProviderFailure(error: ProviderError): never {
-    if (error.code === "permission_denied") return fail("conflict");
+    const detail = `provider_${error.code}`;
+    if (error.code === "permission_denied") return fail("conflict", undefined, detail);
     if (error.code === "rate_limited")
-      return fail("rate", retryAfter(error) ?? RETRY_AFTER_SECONDS);
-    return fail("unavailable", retryAfter(error));
+      return fail("rate", retryAfter(error) ?? RETRY_AFTER_SECONDS, detail);
+    return fail("unavailable", retryAfter(error), detail);
   }
 
   #eventProviderFailure(error: ProviderError): never {
-    if (error.code === "precondition" || error.code === "duplicate") return fail("conflict");
-    if (error.code === "gone") return fail("not_found");
-    if (error.code === "permission_denied" || error.code === "not_found") return fail("not_found");
+    const detail = `provider_${error.code}`;
+    if (error.code === "precondition" || error.code === "duplicate")
+      return fail("conflict", undefined, detail);
+    if (error.code === "gone") return fail("not_found", undefined, detail);
+    if (error.code === "permission_denied" || error.code === "not_found")
+      return fail("not_found", undefined, detail);
     if (error.code === "rate_limited")
-      return fail("rate", retryAfter(error) ?? RETRY_AFTER_SECONDS);
-    return fail("unavailable", retryAfter(error));
+      return fail("rate", retryAfter(error) ?? RETRY_AFTER_SECONDS, detail);
+    return fail("unavailable", retryAfter(error), detail);
   }
 
   #tokenFailure(error: unknown): never {
     if (error instanceof LiveGoogleCalendarError) throw error;
     if (error instanceof GoogleAccessTokenError) {
-      if (error.code === "reconnect") return fail("reconnect");
-      if (error.code === "conflict") return fail("conflict");
-      if (error.code === "rate_limited") return fail("rate", error.retryAfterSeconds);
-      if (error.code === "unavailable") return fail("unavailable", error.retryAfterSeconds);
+      const detail = `token_${error.code}`;
+      if (error.code === "reconnect") return fail("reconnect", undefined, detail);
+      if (error.code === "conflict") return fail("conflict", undefined, detail);
+      if (error.code === "rate_limited") return fail("rate", error.retryAfterSeconds, detail);
+      if (error.code === "unavailable") return fail("unavailable", error.retryAfterSeconds, detail);
     }
     return fail("internal");
   }

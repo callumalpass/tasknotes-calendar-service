@@ -455,7 +455,10 @@ components:
       type: apiKey
       in: cookie
       name: __Host-tasknotes_session
-      description: Web sessions only. Every request must carry an allow-listed Origin.
+      description:
+        Web sessions only. Every request must carry an allow-listed Origin. Any successful
+        authenticated response may set the cookie again, with a new Max-Age, when that use extends
+        the session.
   headers:
     SessionCookie:
       description: HttpOnly web session cookie, set when the redeemed session's client kind is web.
@@ -519,6 +522,7 @@ components:
                 permission_denied,
                 resource_not_found,
                 conflict,
+                reconnect_required,
                 sync_reset_required,
                 rate_limited,
                 dependency_unavailable,
@@ -616,7 +620,7 @@ components:
     SessionCredential:
       type: object
       additionalProperties: false
-      required: [credential, session_id, idle_expires_at, absolute_expires_at]
+      required: [credential, session_id, idle_expires_at]
       properties:
         credential:
           {
@@ -625,15 +629,13 @@ components:
           }
         session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
-        absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     WebSession:
       type: object
       additionalProperties: false
-      required: [session_id, idle_expires_at, absolute_expires_at]
+      required: [session_id, idle_expires_at]
       properties:
         session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
-        absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     SignInRedeemResponse:
       type: object
       additionalProperties: false
@@ -651,16 +653,10 @@ components:
     Session:
       type: object
       additionalProperties: false
-      required:
-        [
-          principal_id,
-          session_id,
-          client_kind,
-          device_name,
-          created_at,
-          idle_expires_at,
-          absolute_expires_at,
-        ]
+      description:
+        A session lives while it is used. `idle_expires_at` is 30 days after its last recorded use,
+        which is recorded at most hourly; there is no fixed maximum age.
+      required: [principal_id, session_id, client_kind, device_name, created_at, idle_expires_at]
       properties:
         principal_id: { type: string, format: uuid }
         session_id: { type: string, pattern: "^[A-Za-z0-9_-]{21}[AQgw]$" }
@@ -673,7 +669,6 @@ components:
           x-max-utf8-bytes: 128
         created_at: { $ref: "#/components/schemas/Rfc3339Instant" }
         idle_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
-        absolute_expires_at: { $ref: "#/components/schemas/Rfc3339Instant" }
     Connection:
       type: object
       additionalProperties: false
@@ -803,6 +798,24 @@ components:
       description:
         The signed-in person's own answer to an invitation, or null when they are not an attendee.
         No other attendee is read.
+    EventWebLink:
+      type: [string, "null"]
+      format: uri
+      pattern: "^https://"
+      maxLength: 2048
+      description:
+        Opens the event in the provider's own web interface. Null when the provider gives none or
+        gives one that is not an https address on the provider's own host. Carries the provider's
+        event reference, so a client treats it as private and never stores or logs it.
+    EventConferenceLink:
+      type: [string, "null"]
+      format: uri
+      pattern: "^https://"
+      maxLength: 2048
+      description:
+        Joins the event's video conference. Null when the event has none or its link is not a
+        credential-free https address. It may contain a meeting passcode, so a client treats it as
+        private and never stores or logs it. Dial-in numbers and access codes are not read.
     Event:
       description:
         Provider-neutral event with opaque deterministic identifiers. Boundary kinds match and every
@@ -831,6 +844,8 @@ components:
           transparency,
           event_type,
           self_response,
+          web_link,
+          conference_link,
         ]
       properties:
         id:
@@ -851,6 +866,8 @@ components:
         transparency: { $ref: "#/components/schemas/EventTransparency" }
         event_type: { $ref: "#/components/schemas/EventType" }
         self_response: { $ref: "#/components/schemas/EventSelfResponse" }
+        web_link: { $ref: "#/components/schemas/EventWebLink" }
+        conference_link: { $ref: "#/components/schemas/EventConferenceLink" }
     TentativeEvent:
       type: object
       additionalProperties: false
@@ -870,6 +887,8 @@ components:
           transparency,
           event_type,
           self_response,
+          web_link,
+          conference_link,
         ]
       properties:
         id:
@@ -890,6 +909,8 @@ components:
         transparency: { $ref: "#/components/schemas/EventTransparency" }
         event_type: { $ref: "#/components/schemas/EventType" }
         self_response: { $ref: "#/components/schemas/EventSelfResponse" }
+        web_link: { $ref: "#/components/schemas/EventWebLink" }
+        conference_link: { $ref: "#/components/schemas/EventConferenceLink" }
     CancelledEvent:
       description: Tombstone with either a complete valid interval or two null boundaries.
       oneOf:
@@ -914,6 +935,8 @@ components:
           transparency,
           event_type,
           self_response,
+          web_link,
+          conference_link,
         ]
       properties:
         id:
@@ -934,6 +957,8 @@ components:
         transparency: { $ref: "#/components/schemas/EventTransparency" }
         event_type: { $ref: "#/components/schemas/EventType" }
         self_response: { $ref: "#/components/schemas/EventSelfResponse" }
+        web_link: { $ref: "#/components/schemas/EventWebLink" }
+        conference_link: { $ref: "#/components/schemas/EventConferenceLink" }
     CancelledEventWithoutInterval:
       type: object
       additionalProperties: false
@@ -953,6 +978,8 @@ components:
           transparency,
           event_type,
           self_response,
+          web_link,
+          conference_link,
         ]
       properties:
         id:
@@ -973,6 +1000,8 @@ components:
         transparency: { $ref: "#/components/schemas/EventTransparency" }
         event_type: { $ref: "#/components/schemas/EventType" }
         self_response: { $ref: "#/components/schemas/EventSelfResponse" }
+        web_link: { $ref: "#/components/schemas/EventWebLink" }
+        conference_link: { $ref: "#/components/schemas/EventConferenceLink" }
     Device:
       type: object
       additionalProperties: false
@@ -1084,7 +1113,7 @@ components:
                       calendars:
                         {
                           type: array,
-                          maxItems: 250,
+                          maxItems: 1000,
                           items: { $ref: "#/components/schemas/Calendar" },
                         },
                     },
@@ -1195,7 +1224,10 @@ components:
       }
     Error409:
       {
-        description: Request conflicts with current state.,
+        description:
+          Request conflicts with current state. The code `reconnect_required` means the person must
+          grant calendar access again before the request can succeed; `conflict` is any other
+          conflict.,
         headers:
           {
             Cache-Control: { $ref: "#/components/headers/NoStore" },

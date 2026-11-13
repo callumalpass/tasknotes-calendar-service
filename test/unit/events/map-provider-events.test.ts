@@ -60,6 +60,8 @@ describe("provider event public mapping", () => {
       transparency: "opaque",
       event_type: "default",
       self_response: null,
+      web_link: null,
+      conference_link: null,
     });
   });
 
@@ -148,6 +150,8 @@ describe("provider event public mapping", () => {
       end: null,
       recurrence: null,
       self_response: null,
+      web_link: null,
+      conference_link: null,
     });
     expect(JSON.stringify(mapped)).not.toContain(providerId);
   });

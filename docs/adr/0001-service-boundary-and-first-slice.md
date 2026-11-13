@@ -58,9 +58,9 @@ one-time and atomic.
 ## Sessions
 
 Device sessions use opaque 256-bit bearer credentials. D1 stores only a peppered SHA-256 digest.
-Sessions have a 30-day idle and 90-day absolute lifetime and are independently revocable. ADR 0006
-gives web sessions an HttpOnly cookie and native sessions sealed WebCrypto custody; raw bearer
-credentials must not be placed in localStorage or URLs.
+Sessions have a 30-day idle and 90-day absolute lifetime and are independently revocable. ADR 0008
+removes the absolute lifetime. ADR 0006 gives web sessions an HttpOnly cookie and native sessions
+sealed WebCrypto custody; raw bearer credentials must not be placed in localStorage or URLs.
 
 ## Token custody
 
@@ -83,7 +83,8 @@ event mirror, event mapping table, or event cache. Authenticated responses are `
 Event titles, descriptions, locations, attendee data, conference links, and raw provider responses
 never enter telemetry. The first public event shape excludes attendees, organizers, conference
 links, HTML links, and raw recurrence rules. ADR 0007 adds the signed-in person's own invitation
-answer and nothing else about attendees.
+answer and nothing else about attendees. ADR 0008 adds the event's own web link and its video
+conference link.
 
 ## Deletion and failure
 

@@ -1364,7 +1364,6 @@ export class OAuthTransactions {
       credential: session.credential,
       session_id: session.id,
       idle_expires_at: session.idleExpiresAt,
-      absolute_expires_at: session.absoluteExpiresAt,
     };
   }
 }

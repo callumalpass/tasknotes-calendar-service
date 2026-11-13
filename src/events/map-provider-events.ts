@@ -41,6 +41,8 @@ export async function mapProviderEvents(
           transparency: event.transparency,
           event_type: event.type,
           self_response: event.selfResponse ?? null,
+          web_link: event.webLink ?? null,
+          conference_link: event.conferenceLink ?? null,
           recurrence:
             event.recurrence === undefined
               ? null

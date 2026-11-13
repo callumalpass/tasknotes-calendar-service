@@ -27,7 +27,9 @@ over a cookie, so a request never mixes the two.
 `__Host-tasknotes_session`, set with `Path=/; Secure; HttpOnly; SameSite=Strict` and a `Max-Age` of
 the absolute lifetime. The `__Host-` prefix binds it to the service host. The server still enforces
 idle expiry, absolute expiry, and revocation on every request; the cookie conveys no authority of
-its own. A header carrying more than one session cookie is rejected.
+its own. A header carrying more than one session cookie is rejected. ADR 0008 removes the absolute
+lifetime: the cookie's `Max-Age` is the idle lifetime, and the cookie is issued again when a use
+extends the session.
 
 ### Cross-site protection
 

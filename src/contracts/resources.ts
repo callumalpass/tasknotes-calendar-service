@@ -18,7 +18,6 @@ export const SessionSchema = z.strictObject({
   device_name: DeviceNameSchema,
   created_at: Rfc3339InstantSchema,
   idle_expires_at: Rfc3339InstantSchema,
-  absolute_expires_at: Rfc3339InstantSchema,
 });
 
 export const ConnectionSchema = z.strictObject({
@@ -41,6 +40,8 @@ function boundedCodePointText(maximumCharacters: number, allowEmpty = true) {
   return allowEmpty ? schema : schema.refine((value) => value.length > 0);
 }
 
+export const MAX_CALENDARS = 1000;
+
 export const CalendarSchema = z.strictObject({
   id: UuidSchema,
   connection_id: UuidSchema,
@@ -57,7 +58,7 @@ export const CalendarSchema = z.strictObject({
 });
 
 export const CalendarsResponseSchema = z.strictObject({
-  calendars: z.array(CalendarSchema).max(250),
+  calendars: z.array(CalendarSchema).max(MAX_CALENDARS),
 });
 
 export const EventsQuerySchema = z
@@ -117,6 +118,16 @@ function eventTextSchema(maximumCharacters: number) {
     .refine((value) => Array.from(value).length <= maximumCharacters);
 }
 
+/** An absolute https link without credentials. */
+const LinkSchema = z
+  .string()
+  .max(2048)
+  .refine((value) => {
+    if (!URL.canParse(value)) return false;
+    const url = new URL(value);
+    return url.protocol === "https:" && url.username === "" && url.password === "";
+  });
+
 const eventCommonShape = {
   id: EventIdSchema,
   etag: EtagSchema.nullable(),
@@ -136,6 +147,8 @@ const eventCommonShape = {
     "from_gmail",
   ]),
   self_response: z.enum(["accepted", "declined", "tentative", "needs_action"]).nullable(),
+  web_link: LinkSchema.nullable(),
+  conference_link: LinkSchema.nullable(),
 } as const;
 
 const ConfirmedEventSchema = z.strictObject({

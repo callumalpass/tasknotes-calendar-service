@@ -133,12 +133,11 @@ describe("web session cookie", () => {
     const credential = credentialFrom(response);
     expect(text).not.toContain(credential);
     expect(Object.keys((JSON.parse(text) as { session: object }).session).sort()).toEqual([
-      "absolute_expires_at",
       "idle_expires_at",
       "session_id",
     ]);
     expect(response.headers.get("set-cookie")).toBe(
-      `${COOKIE}=${credential}; Max-Age=7776000; Path=/; Secure; HttpOnly; SameSite=Strict`,
+      `${COOKIE}=${credential}; Max-Age=2592000; Path=/; Secure; HttpOnly; SameSite=Strict`,
     );
     expect(response.headers.get("access-control-allow-credentials")).toBe("true");
     expect((await send("/v1/session", { headers: withCookie(credential) })).status).toBe(200);
@@ -214,6 +213,63 @@ describe("web session cookie", () => {
     expect(responses.filter((response) => response.status === 200)).toHaveLength(1);
     expect(responses.filter((response) => response.headers.has("set-cookie"))).toHaveLength(1);
     expect((await post(path, request)).headers.has("set-cookie")).toBe(false);
+  });
+
+  it("issues the cookie again only when a use begins the idle period again", async () => {
+    const { credential, sessionId } = await signIn("cookie-renewal");
+    const headers = withCookie(credential);
+    const fresh = await send("/v1/session", { headers });
+    expect(fresh.status).toBe(200);
+    expect(fresh.headers.get("set-cookie")).toBeNull();
+
+    await bindings.DB.prepare(
+      `UPDATE device_sessions
+       SET created_at = created_at - 3600, last_used_at = last_used_at - 3600,
+           idle_expires_at = unixepoch() + 60,
+           absolute_expires_at = unixepoch() + 60
+       WHERE id = ?`,
+    )
+      .bind(sessionId)
+      .run();
+    const renewed = await send("/v1/session", { headers });
+    expect(renewed.status).toBe(200);
+    expect(renewed.headers.get("set-cookie")).toBe(
+      `${COOKIE}=${credential}; Max-Age=2592000; Path=/; Secure; HttpOnly; SameSite=Strict`,
+    );
+    const body = await renewed.json<{ idle_expires_at: string }>();
+    expect(Date.parse(body.idle_expires_at) - Date.now()).toBeGreaterThan(29 * 24 * 3_600_000);
+    expect((await send("/v1/session", { headers })).headers.get("set-cookie")).toBeNull();
+
+    // A response without a body renews as well.
+    await bindings.DB.prepare(
+      `UPDATE device_sessions
+       SET created_at = created_at - 3600, last_used_at = last_used_at - 3600 WHERE id = ?`,
+    )
+      .bind(sessionId)
+      .run();
+    const other = await signIn("cookie-renewal");
+    const revoked = await send(`/v1/devices/${other.sessionId}`, { method: "DELETE", headers });
+    expect(revoked.status).toBe(204);
+    expect(revoked.headers.get("set-cookie")).toContain("Max-Age=2592000");
+  });
+
+  it("never sets a cookie when a bearer session renews", async () => {
+    const { path, request } = await authorized("obsidian", "cookie-bearer-renewal");
+    const response = await post(path, request, null);
+    const { session } = await response.json<{
+      session: { credential: string; session_id: string };
+    }>();
+    await bindings.DB.prepare(
+      `UPDATE device_sessions
+       SET created_at = created_at - 3600, last_used_at = last_used_at - 3600 WHERE id = ?`,
+    )
+      .bind(session.session_id)
+      .run();
+    const used = await send("/v1/session", {
+      headers: { authorization: `Bearer ${session.credential}` },
+    });
+    expect(used.status).toBe(200);
+    expect(used.headers.get("set-cookie")).toBeNull();
   });
 
   it("clears the cookie and revokes when signing out this session", async () => {

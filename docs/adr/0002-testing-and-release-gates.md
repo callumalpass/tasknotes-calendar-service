@@ -15,7 +15,7 @@ Before any public beta, P0 suites must prove:
 - issuer/subject identity uniqueness and same-email separation;
 - state, nonce, provider PKCE, TaskNotes PKCE, intent, client, expiry, and callback binding;
 - one callback exchange and one session issuance under replay and concurrency;
-- device credential hashing, revocation, idle expiry, and absolute expiry;
+- device credential hashing, revocation, idle expiry, and renewal on use;
 - token-envelope tamper/AAD/key-version failure and rotation safety;
 - connection refresh serialization and rotated-refresh-token preservation;
 - deletion monotonicity against delayed callbacks, refreshes, and cache fills;

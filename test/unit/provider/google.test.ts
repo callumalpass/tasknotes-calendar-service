@@ -252,6 +252,7 @@ describe("Google provider HTTP boundary", () => {
             selected: true,
           },
         ],
+        omittedCount: 0,
         nextPageToken: "next+/=?& token",
       },
     });
@@ -262,14 +263,24 @@ describe("Google provider HTTP boundary", () => {
     ["summary", "😀".repeat(501)],
     ["description", "😀".repeat(4001)],
     ["timeZone", "x".repeat(101)],
-  ] as const)("rejects hostile calendar %s metadata", async (field, value) => {
+  ] as const)("leaves out a calendar with hostile %s metadata", async (field, value) => {
     const result = await listGoogleCalendarsPage({
       configuration: testConfiguration,
       accessToken: "access",
-      fetch: fakeFetch(() => json({ items: [{ ...calendar, [field]: value }] })),
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            { ...calendar, [field]: value },
+            { ...calendar, id: "kept" },
+          ],
+        }),
+      ),
     });
 
-    expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    expect(result).toMatchObject({
+      ok: true,
+      value: { items: [{ id: "kept" }], omittedCount: 1 },
+    });
   });
 
   it("accepts calendar metadata at the public code-point boundaries", async () => {
@@ -312,7 +323,7 @@ describe("Google provider HTTP boundary", () => {
     expect(requested?.searchParams.get("showDeleted")).toBeNull();
     expect(requested?.searchParams.get("orderBy")).toBe("startTime");
     expect(requested?.searchParams.get("fields")).toBe(
-      "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
+      "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),htmlLink,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))",
     );
     // Only the person's own entry, and of it only whether it is theirs and their answer.
     expect(requested?.searchParams.get("maxAttendees")).toBe("1");
@@ -321,9 +332,13 @@ describe("Google provider HTTP boundary", () => {
       "displayName",
       "comment",
       "organizer",
-      "conferenceData",
-      "htmlLink",
-      "recurrence",
+      "conferenceSolution",
+      "conferenceId",
+      "accessCode",
+      "passcode",
+      "pin",
+      "notes",
+      "recurrence,",
       "extendedProperties",
     ]) {
       expect(requested?.searchParams.get("fields")).not.toContain(excluded);
@@ -352,7 +367,8 @@ describe("Google provider HTTP boundary", () => {
       },
     });
     const serialized = JSON.stringify(result.value);
-    for (const excluded of ["attendees", "organizer", "conference", "htmlLink", "RRULE"]) {
+    // The fixture's web link is not on a Google host, and its conference has no video entry.
+    for (const excluded of ["attendees", "organizer", "Link", "provider.test", "RRULE"]) {
       expect(serialized).not.toContain(excluded);
     }
   });
@@ -488,13 +504,94 @@ describe("Google provider HTTP boundary", () => {
     ]);
   });
 
-  it("rejects a calendar whose access it cannot classify", async () => {
+  it("leaves out a calendar whose access it cannot classify and keeps the rest", async () => {
     const result = await listGoogleCalendarsPage({
       configuration: testConfiguration,
       accessToken: "access",
-      fetch: fakeFetch(() => json({ items: [{ ...calendar, accessRole: "none" }] })),
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            { ...calendar, id: "unknown-role", accessRole: "none" },
+            { ...calendar, id: "known-role" },
+            "not a calendar",
+          ],
+        }),
+      ),
     });
-    expect(result).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    expect(result).toMatchObject({
+      ok: true,
+      value: { items: [{ id: "known-role", access: "owner" }], omittedCount: 2 },
+    });
+  });
+
+  it.each([
+    [
+      "the conference's video entry, whoever provides it",
+      {
+        hangoutLink: "https://meet.google.com/aaa-bbbb-ccc",
+        conferenceData: {
+          entryPoints: [
+            { entryPointType: "phone", uri: "tel:+15550100" },
+            { entryPointType: "video", uri: "https://zoom.example/j/123?pwd=abc" },
+          ],
+        },
+      },
+      "https://zoom.example/j/123?pwd=abc",
+    ],
+    [
+      "Meet's own link when the conference has no usable video entry",
+      {
+        hangoutLink: "https://meet.google.com/aaa-bbbb-ccc",
+        conferenceData: { entryPoints: [{ entryPointType: "video", uri: "http://plain.example" }] },
+      },
+      "https://meet.google.com/aaa-bbbb-ccc",
+    ],
+    ["nothing for a conference without entries", { conferenceData: {} }, undefined],
+    ["nothing for a link that is not https", { hangoutLink: "javascript:alert(1)" }, undefined],
+    [
+      "nothing for a link that carries credentials",
+      { hangoutLink: "https://user:secret@meet.example/room" },
+      undefined,
+    ],
+    [
+      "nothing for an overlong link",
+      { hangoutLink: `https://meet.example/${"a".repeat(2_048)}` },
+      undefined,
+    ],
+    ["nothing for a link that is not text", { hangoutLink: 7, conferenceData: "x" }, undefined],
+  ])("reads as the join link %s", async (_name, fields, expected) => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() => json({ items: [{ ...timedEvent, ...fields }] })),
+    });
+    if (!result.ok) throw new Error("expected successful event page");
+    expect(result.value.omittedCount).toBe(0);
+    expect(result.value.items[0]?.conferenceLink).toBe(expected);
+  });
+
+  it.each([
+    [
+      "https://www.google.com/calendar/event?eid=abc",
+      "https://www.google.com/calendar/event?eid=abc",
+    ],
+    [
+      "https://calendar.google.com/calendar/event?eid=abc",
+      "https://calendar.google.com/calendar/event?eid=abc",
+    ],
+    ["https://www.google.com.attacker.example/calendar/event?eid=abc", undefined],
+    ["https://attacker.example/calendar/event?eid=abc", undefined],
+    ["http://www.google.com/calendar/event?eid=abc", undefined],
+    ["https://user@www.google.com/calendar/event?eid=abc", undefined],
+    ["/calendar/event?eid=abc", undefined],
+    [null, undefined],
+  ])("reads the web link %s as %s", async (htmlLink, expected) => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() => json({ items: [{ ...timedEvent, htmlLink }] })),
+    });
+    if (!result.ok) throw new Error("expected successful event page");
+    expect(result.value.items).toHaveLength(1);
+    expect(result.value.items[0]?.webLink).toBe(expected);
   });
 
   it("preserves exclusive all-day ends and recurrence-instance original starts", async () => {
@@ -606,7 +703,6 @@ describe("Google provider HTTP boundary", () => {
   it.each([
     [{ date: "2026-03-01", dateTime: "2026-03-01T00:00:00Z" }, { date: "2026-03-02" }],
     [{ date: "2026-02-30" }, { date: "2026-03-02" }],
-    [{ date: "2026-03-01", timeZone: "UTC" }, { date: "2026-03-02" }],
     [{ dateTime: "2026-03-01T00:00:00" }, { dateTime: "2026-03-01T01:00:00Z" }],
     [{ date: "2026-03-01" }, { dateTime: "2026-03-02T00:00:00Z" }],
     [{ dateTime: "2026-03-01T02:00:00Z" }, { dateTime: "2026-03-01T01:00:00Z" }],
@@ -629,6 +725,38 @@ describe("Google provider HTTP boundary", () => {
       ),
     });
     expect(result).toMatchObject({ ok: true, value: { items: [], omittedCount: 1 } });
+  });
+
+  it("reads an all-day event whose dates carry a time zone", async () => {
+    const result = await listGoogleEventsPage({
+      ...eventsRequest,
+      fetch: fakeFetch(() =>
+        json({
+          items: [
+            {
+              id: "zoned-all-day",
+              etag: '"1"',
+              status: "confirmed",
+              updated: "2026-03-01T00:00:00Z",
+              start: { date: "2026-03-01", timeZone: "Europe/London" },
+              end: { date: "2026-03-02", timeZone: "not a zone" },
+            },
+          ],
+        }),
+      ),
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        items: [
+          {
+            start: { kind: "all_day", date: "2026-03-01" },
+            end: { kind: "all_day", date: "2026-03-02" },
+          },
+        ],
+        omittedCount: 0,
+      },
+    });
   });
 
   it.each([
@@ -779,7 +907,7 @@ describe("Google provider HTTP boundary", () => {
       accessToken: "access",
       fetch: fakeFetch(() => json({ items: [{ ...calendar, summary: "x".repeat(2_049) }] })),
     });
-    expect(huge).toMatchObject({ ok: false, error: { code: "invalid_response" } });
+    expect(huge).toMatchObject({ ok: true, value: { items: [], omittedCount: 1 } });
   });
 
   it.each([

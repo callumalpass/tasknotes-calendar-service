@@ -21,7 +21,7 @@ import {
 } from "../../src/contracts";
 import type { FakeGoogleConfiguration, FakeGoogleStats } from "../support/fake-google";
 import { encryptTokenEnvelope, type TokenPayload } from "../../src/crypto/token-envelope";
-import type { EventsQuery } from "../../src/contracts";
+import { CalendarsResponseSchema, MAX_CALENDARS, type EventsQuery } from "../../src/contracts";
 import type { Env } from "../../src/env";
 import { googleTestConfiguration } from "../../src/provider/google";
 import { tokenEnvelopeToRow } from "../../src/storage/token-envelope-row";
@@ -1055,7 +1055,9 @@ describe("LiveGoogleCalendar with real D1", () => {
       accessTokens: tokens,
       nowEpochSeconds: () => 1,
     }).listCalendars(PRINCIPAL);
-    expect(second).toEqual(first);
+    // Only the request that asked the provider reports on the provider's list.
+    expect(first.discovery).toEqual({ omittedCount: 0, truncated: false });
+    expect(second).toEqual({ calendars: first.calendars });
     expect(second.calendars[0]?.can_write).toBe(true);
     expect(providerState.calendarCalls).toBe(1);
     expect(access).not.toHaveBeenCalled();
@@ -1114,11 +1116,14 @@ describe("LiveGoogleCalendar with real D1", () => {
     delete providerState.blockCalendar;
     providerState.calendarResponses.push(json({ items: [] }));
     const skewed = service(providerState, { db: clockDatabase(301), nowEpochSeconds: () => 1 });
-    await expect(skewed.listCalendars(PRINCIPAL)).resolves.toEqual({ calendars: [] });
+    await expect(skewed.listCalendars(PRINCIPAL)).resolves.toEqual({
+      calendars: [],
+      discovery: { omittedCount: 0, truncated: false },
+    });
     expect(await testEnv.DB.prepare("SELECT 1 FROM calendars").first()).toBeNull();
   });
 
-  it("accepts 250 terminal calendars and rejects nonterminal and duplicate pages without mutation", async () => {
+  it("accepts 250 terminal calendars and rejects a duplicate page without mutation", async () => {
     await seed();
     const items = Array.from({ length: 250 }, (_, index) => ({
       id: `provider-${index}`,
@@ -1134,18 +1139,111 @@ describe("LiveGoogleCalendar with real D1", () => {
       count: 250,
     });
     instance = service(providerState, { db: clockDatabase(301) });
-    providerState.calendarResponses.push(
-      json({ items: [items[0]], nextPageToken: "more-calendars" }),
-    );
-    await expectCode(instance.listCalendars(PRINCIPAL), "conflict");
-    expect(await testEnv.DB.prepare("SELECT COUNT(*) AS count FROM calendars").first()).toEqual({
-      count: 250,
-    });
     providerState.calendarResponses.push(json({ items: [items[0], items[0]] }));
     await expectCode(instance.listCalendars(PRINCIPAL), "unavailable");
     expect(await testEnv.DB.prepare("SELECT COUNT(*) AS count FROM calendars").first()).toEqual({
       count: 250,
     });
+    // The same calendar on two pages is as unusable as twice on one.
+    providerState.calendarResponses.push(
+      json({ items: [items[0]], nextPageToken: "more-calendars" }),
+      json({ items: [items[0]] }),
+    );
+    await expectCode(instance.listCalendars(PRINCIPAL), "unavailable");
+    expect(await testEnv.DB.prepare("SELECT COUNT(*) AS count FROM calendars").first()).toEqual({
+      count: 250,
+    });
+  });
+
+  it("reads a calendar list to its end across pages and replaces mappings once", async () => {
+    await seed();
+    const page = (number: number, count: number, more: boolean) =>
+      json({
+        items: Array.from({ length: count }, (_, index) => ({
+          id: `page-${number}-provider-${index}`,
+          summary: `Calendar ${number}.${String(index).padStart(3, "0")}`,
+          accessRole: index === 0 ? "curator" : "reader",
+        })),
+        ...(more ? { nextPageToken: `after-page-${number}` } : {}),
+      });
+    const providerState = state({
+      calendarResponses: [page(1, 250, true), page(2, 250, true), page(3, 7, false)],
+    });
+    const listed = await service(providerState).listCalendars(PRINCIPAL);
+    expect(providerState.calendarCalls).toBe(3);
+    // One calendar per page has a role the service does not know.
+    expect(listed.calendars).toHaveLength(504);
+    expect(listed.discovery).toEqual({ omittedCount: 3, truncated: false });
+    expect(await testEnv.DB.prepare("SELECT COUNT(*) AS count FROM calendars").first()).toEqual({
+      count: 504,
+    });
+    expect(
+      await testEnv.DB.prepare("SELECT discovery_version FROM connections WHERE id = ?")
+        .bind(CONNECTION)
+        .first(),
+    ).toEqual({ discovery_version: 1 });
+
+    // A later, shorter list is authoritative: mappings it no longer names are removed.
+    providerState.calendarResponses.push(page(2, 3, false));
+    const again = await service(providerState, { db: clockDatabase(301) }).listCalendars(PRINCIPAL);
+    expect(again.calendars.map((calendar) => calendar.name)).toEqual([
+      "Calendar 2.001",
+      "Calendar 2.002",
+    ]);
+    const kept = listed.calendars.filter((calendar) => calendar.name.startsWith("Calendar 2.00"));
+    expect(again.calendars.map((calendar) => calendar.id).sort()).toEqual(
+      kept
+        .filter((calendar) => /\.00[12]$/u.test(calendar.name))
+        .map((calendar) => calendar.id)
+        .sort(),
+    );
+  });
+
+  it("lists at most the response bound and reports that the provider had more", async () => {
+    await seed();
+    const page = (number: number) =>
+      json({
+        items: Array.from({ length: 250 }, (_, index) => ({
+          id: `page-${number}-provider-${index}`,
+          summary: `Calendar ${number}.${String(index).padStart(3, "0")}`,
+          accessRole: "reader",
+        })),
+        nextPageToken: `after-page-${number}`,
+      });
+    const providerState = state({
+      calendarResponses: [page(1), page(2), page(3), page(4), page(5)],
+    });
+    const listed = await service(providerState).listCalendars(PRINCIPAL);
+    expect(providerState.calendarCalls).toBe(4);
+    expect(listed.calendars).toHaveLength(MAX_CALENDARS);
+    expect(listed.discovery).toEqual({ omittedCount: 0, truncated: true });
+    expect(CalendarsResponseSchema.safeParse({ calendars: listed.calendars }).success).toBe(true);
+  });
+
+  it("abandons a list when a later page fails, leaving mappings as they were", async () => {
+    await seed();
+    const providerState = state({
+      calendarResponses: [
+        json({
+          items: [{ id: "first-page", summary: "First", accessRole: "reader" }],
+          nextPageToken: "more",
+        }),
+        json({ error: "server" }, 500),
+      ],
+    });
+    await expect(service(providerState).listCalendars(PRINCIPAL)).rejects.toMatchObject({
+      code: "unavailable",
+      detail: "provider_unavailable",
+    });
+    expect(providerState.calendarCalls).toBe(2);
+    expect(await testEnv.DB.prepare("SELECT 1 FROM calendars").first()).toBeNull();
+    expect(
+      await testEnv.DB.prepare(
+        "SELECT discovery_version, discovery_lease_owner FROM connections WHERE id = ?",
+      )
+        .bind(CONNECTION)
+        .first(),
+    ).toEqual({ discovery_version: 0, discovery_lease_owner: null });
   });
 
   it.each([0, 250] as const)(
@@ -1200,7 +1298,10 @@ describe("LiveGoogleCalendar with real D1", () => {
         );
         expect(providerState.calendarCalls).toBe(0);
       } else {
-        await expect(instance.listCalendars(PRINCIPAL)).resolves.toEqual({ calendars: [] });
+        await expect(instance.listCalendars(PRINCIPAL)).resolves.toEqual({
+          calendars: [],
+          discovery: { omittedCount: 0, truncated: false },
+        });
         expect(providerState.calendarCalls).toBe(1);
       }
     },
@@ -1491,6 +1592,41 @@ describe("LiveGoogleCalendar with real D1", () => {
     });
   });
 
+  it("tells the owner of a calendar whose access lapsed to reconnect, and nobody else", async () => {
+    await seed({ calendar: true });
+    await insertPrincipal(OTHER_PRINCIPAL, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    await testEnv.DB.prepare(
+      `UPDATE connections SET status = 'reconnect_required', refresh_lease_owner = NULL,
+         refresh_lease_until = NULL, refresh_lease_generation = NULL,
+         refresh_lease_token_version = NULL, discovery_lease_owner = NULL,
+         discovery_lease_until = NULL, discovery_lease_generation = NULL,
+         discovery_lease_token_version = NULL, updated_at = MAX(unixepoch(), updated_at)`,
+    ).run();
+    const providerState = state();
+    const instance = service(providerState);
+    const id = await sealEventId(
+      "lapsed-event",
+      { environment: "local", provider: "google", authorizationScopedCalendarId: CALENDAR },
+      EVENT_KEY,
+    );
+    for (const attempt of [
+      () => instance.listEvents(PRINCIPAL, CALENDAR, RANGE),
+      () => instance.listChanges(PRINCIPAL, CALENDAR, {}),
+      () => instance.event(PRINCIPAL, CALENDAR, "GET", id),
+    ]) {
+      await expect(attempt()).rejects.toMatchObject({
+        code: "reconnect",
+        detail: "connection_lapsed",
+      });
+    }
+    await expectCode(instance.listEvents(OTHER_PRINCIPAL, CALENDAR, RANGE), "not_found");
+    await expectCode(
+      instance.listEvents(PRINCIPAL, "99999999-9999-4999-8999-999999999999", RANGE),
+      "not_found",
+    );
+    expect(providerState).toMatchObject({ calendarCalls: 0, eventCalls: 0, refreshCalls: 0 });
+  });
+
   it("returns no-connection discovery, rejects reconnect, and contains cursor sealing failures", async () => {
     const noConnection = state();
     await insertPrincipal();
@@ -1656,6 +1792,7 @@ describe("LiveGoogleCalendar with real D1", () => {
       service(success, { providerTimeoutMs: 0 }).listCalendars(PRINCIPAL),
     ).resolves.toEqual({
       calendars: [],
+      discovery: { omittedCount: 0, truncated: false },
     });
 
     await insertCalendar();
@@ -1669,12 +1806,15 @@ describe("LiveGoogleCalendar with real D1", () => {
     ).resolves.toEqual({ events: [], next_cursor: null, omitted_count: 0 });
   });
 
-  it("rejects malformed calendar metadata and malformed event intervals atomically", async () => {
+  it("leaves out a malformed calendar and a malformed event interval, and counts each", async () => {
     await seed();
     const malformedCalendar = state({
       calendarResponses: [json({ items: [{ id: "provider", summary: "", accessRole: "reader" }] })],
     });
-    await expectCode(service(malformedCalendar).listCalendars(PRINCIPAL), "unavailable");
+    await expect(service(malformedCalendar).listCalendars(PRINCIPAL)).resolves.toEqual({
+      calendars: [],
+      discovery: { omittedCount: 1, truncated: false },
+    });
     expect(await testEnv.DB.prepare("SELECT 1 FROM calendars").first()).toBeNull();
 
     await insertCalendar();

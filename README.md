@@ -4,8 +4,9 @@ A provider-neutral calendar connection service for TaskNotes clients.
 
 A Google-only Cloudflare Worker with federated Google identity, encrypted server-side token custody,
 per-device sessions, calendar discovery, bounded and incremental event reads, and a stateless event
-write proxy. See [ADR 0005](docs/adr/0005-stateless-write-proxy.md) and
-[ADR 0007](docs/adr/0007-event-display-fields-and-placement.md).
+write proxy. See [ADR 0005](docs/adr/0005-stateless-write-proxy.md),
+[ADR 0007](docs/adr/0007-event-display-fields-and-placement.md) and
+[ADR 0008](docs/adr/0008-links-sliding-sessions-and-tolerant-discovery.md).
 
 Reads, writes, incremental changes, and sign-in confirmation passed a supervised live LAB run on
 2026-11-06; see [Google readiness](docs/google-readiness.md) for remaining gaps. Staging and

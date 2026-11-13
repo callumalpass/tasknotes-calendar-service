@@ -41,8 +41,8 @@ export function createWorker() {
           SELECT id FROM oauth_transactions WHERE expires_at <= unixepoch() ORDER BY expires_at LIMIT 100
         )`),
         env.DB.prepare(`DELETE FROM device_sessions WHERE id IN (
-          SELECT id FROM device_sessions WHERE revoked_at IS NOT NULL
-            OR idle_expires_at <= unixepoch() OR absolute_expires_at <= unixepoch()
+          SELECT id FROM device_sessions
+          WHERE revoked_at IS NOT NULL OR idle_expires_at <= unixepoch()
           ORDER BY idle_expires_at LIMIT 100
         )`),
         env.DB.prepare(`DELETE FROM identity_deletion_fences WHERE identity_digest IN (

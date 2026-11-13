@@ -301,7 +301,8 @@ describe("device sessions against migrated D1", () => {
       device_name: "Callum's phone",
       last_used_at: START / 1_000,
       idle_expires_at: (START + 30 * DAY) / 1_000,
-      absolute_expires_at: (START + 90 * DAY) / 1_000,
+      // Retired, and written only so the Worker before ADR 0008 still reads a valid row.
+      absolute_expires_at: (START + 30 * DAY) / 1_000,
       revoked_at: null,
     });
 
@@ -449,32 +450,70 @@ describe("device sessions against migrated D1", () => {
     await expect(sessions.authenticate(second.credential)).resolves.not.toBeNull();
   });
 
-  it("fails at idle and absolute expiry boundaries", async () => {
+  it("fails at the idle expiry boundary", async () => {
     await addPrincipal("principal-a");
     const idle = await createSession({
       principalId: "principal-a",
       deviceName: "Idle boundary",
       clientKind: "obsidian",
     });
-    const absolute = await createSession({
+    const unused = await createSession({
       principalId: "principal-a",
-      deviceName: "Absolute boundary",
-      clientKind: "android",
+      deviceName: "Never used",
+      clientKind: "web",
     });
-    await testEnv.DB.prepare(
-      "UPDATE device_sessions SET idle_expires_at = absolute_expires_at WHERE id = ?",
-    )
-      .bind(absolute.id)
-      .run();
+    clock.milliseconds = START + 30 * DAY - 1_000;
+    await expect(sessions.authenticate(idle.credential)).resolves.not.toBeNull();
+    await expect(sessions.list("principal-a")).resolves.toHaveLength(2);
     clock.milliseconds = START + 30 * DAY;
+    await expect(sessions.authenticate(unused.credential)).resolves.toBeNull();
+    await expect(sessions.list("principal-a")).resolves.toMatchObject([{ id: idle.id }]);
+    // The use a second before the boundary began the period again.
+    clock.milliseconds = START + 60 * DAY - 2_000;
+    await expect(sessions.authenticate(idle.credential)).resolves.not.toBeNull();
+    clock.milliseconds = START + 90 * DAY - 2_000;
     await expect(sessions.authenticate(idle.credential)).resolves.toBeNull();
-    clock.milliseconds = START + 90 * DAY - 1;
-    await expect(sessions.authenticate(absolute.credential)).resolves.not.toBeNull();
-    clock.milliseconds = START + 90 * DAY;
-    await expect(sessions.authenticate(absolute.credential)).resolves.toBeNull();
   });
 
-  it("throttles usage writes to hourly and caps idle expiry at absolute expiry", async () => {
+  it("keeps a session that is used alive past any fixed age", async () => {
+    await addPrincipal("principal-a");
+    const created = await createSession({
+      principalId: "principal-a",
+      deviceName: "Daily driver",
+      clientKind: "web",
+    });
+    for (let day = 20; day <= 400; day += 20) {
+      clock.milliseconds = START + day * DAY;
+      await expect(sessions.authenticate(created.credential)).resolves.toMatchObject({
+        renewed: true,
+      });
+    }
+    const stored = await storedSession(created.id);
+    expect(stored.idle_expires_at).toBe((START + 430 * DAY) / 1_000);
+    expect(stored.absolute_expires_at).toBe(stored.idle_expires_at);
+    expect(await sessions.list("principal-a")).toHaveLength(1);
+  });
+
+  it("ignores a stored absolute expiry written before it was retired", async () => {
+    await addPrincipal("principal-a");
+    const created = await createSession({
+      principalId: "principal-a",
+      deviceName: "Signed in long ago",
+      clientKind: "ios",
+    });
+    await testEnv.DB.prepare(
+      "UPDATE device_sessions SET idle_expires_at = ?, absolute_expires_at = ? WHERE id = ?",
+    )
+      .bind((START + 100 * DAY) / 1_000, (START + 100 * DAY) / 1_000, created.id)
+      .run();
+    clock.milliseconds = START + 95 * DAY;
+    await expect(sessions.authenticate(created.credential)).resolves.toMatchObject({
+      renewed: true,
+    });
+    expect((await storedSession(created.id)).idle_expires_at).toBe((START + 125 * DAY) / 1_000);
+  });
+
+  it("throttles usage writes to hourly and reports which use renewed the session", async () => {
     await addPrincipal("principal-a");
     const created = await createSession({
       principalId: "principal-a",
@@ -483,23 +522,23 @@ describe("device sessions against migrated D1", () => {
     });
 
     clock.milliseconds = START + 60 * 60 * 1_000 - 1;
-    await sessions.authenticate(created.credential);
+    await expect(sessions.authenticate(created.credential)).resolves.toMatchObject({
+      renewed: false,
+    });
     expect((await storedSession(created.id)).last_used_at).toBe(START / 1_000);
 
     clock.milliseconds += 1;
-    await sessions.authenticate(created.credential);
-    let stored = await storedSession(created.id);
+    const renewed = await sessions.authenticate(created.credential);
+    expect(renewed).toMatchObject({
+      renewed: true,
+      session: { idleExpiresAt: new Date(START + 30 * DAY + 60 * 60 * 1_000).toISOString() },
+    });
+    const stored = await storedSession(created.id);
     expect(stored.last_used_at).toBe((START + 60 * 60 * 1_000) / 1_000);
     expect(stored.idle_expires_at).toBe((START + 30 * DAY + 60 * 60 * 1_000) / 1_000);
-
-    clock.milliseconds = START + 70 * DAY;
-    await testEnv.DB.prepare("UPDATE device_sessions SET idle_expires_at = ? WHERE id = ?")
-      .bind((START + 89 * DAY) / 1_000, created.id)
-      .run();
-    await sessions.authenticate(created.credential);
-    stored = await storedSession(created.id);
-    expect(stored.last_used_at).toBe((START + 70 * DAY) / 1_000);
-    expect(stored.idle_expires_at).toBe(stored.absolute_expires_at);
+    await expect(sessions.authenticate(created.credential)).resolves.toMatchObject({
+      renewed: false,
+    });
   });
 
   it("revokes only an owned session and revoked sessions cannot authenticate", async () => {

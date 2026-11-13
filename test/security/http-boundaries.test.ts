@@ -281,6 +281,7 @@ describe("Worker HTTP security boundaries", () => {
           params: { connection_id: connection.id },
           query: {},
           originAllowed: false,
+          log: {},
           authenticated: {
             principalId: authenticated.principalId,
             sessionId: authenticated.session.id,

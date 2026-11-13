@@ -40,6 +40,10 @@ plain default and never omits the event. Only the person's own attendee entry is
 provider; no other attendee is read. Calendars report the person's own name for them, the provider's
 colour, and whether the person shows them in the provider's interface. See ADR 0007.
 
+Events carry a link that opens them in the provider's interface and a link that joins their video
+conference. Both are calendar content: never stored, never logged, and `null` unless they are plain
+https addresses without credentials. See ADR 0008.
+
 ## Provider writes
 
 Writes are authorized like reads, rechecked immediately before the provider call, and never stored.
@@ -54,8 +58,10 @@ Refresh attempts are serialized by a D1-clocked lease bound to the exact connect
 token version. The lease is stealable after expiry and every provider failure releases it, so a
 crash or Google outage retries rather than forcing re-consent. If a rotated token was really lost,
 the retry receives `invalid_grant` and reaches `reconnect_required`. Calendar discovery uses a
-separately bounded, stealable lease. Only one complete terminal Calendar List page may atomically
-replace mappings and advance its discovery version.
+separately bounded, stealable lease. Only a Calendar List read to its end, or to the bound of 1,000
+calendars, may atomically replace mappings and advance its discovery version. A calendar the service
+cannot represent is left out and counted, so one unusual calendar cannot fail the list. See
+ADR 0008.
 
 Event cursors are opened only after principal-scoped calendar authorization and before any token or
 provider operation. They authenticate the principal, connection generation, public calendar, read

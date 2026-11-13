@@ -5,8 +5,9 @@ import {
   type RouteDefinition,
   type RouteName,
 } from "../contracts";
+import { IDLE_LIFETIME_SECONDS } from "../auth/device-sessions";
 import { ContractError, errorResponse, jsonResponse, noContentResponse } from "./responses";
-import { CLEARED_SESSION_COOKIE, parseSessionCookie } from "./session-cookie";
+import { CLEARED_SESSION_COOKIE, parseSessionCookie, sessionCookie } from "./session-cookie";
 
 export interface AuthenticatedRouteContext {
   readonly principalId: string;
@@ -19,9 +20,19 @@ export interface AuthenticatedRouteContext {
     readonly createdAt: string;
     readonly lastUsedAt: string;
     readonly idleExpiresAt: string;
-    readonly absoluteExpiresAt: string;
     readonly revokedAt: string | null;
   }>;
+}
+
+/**
+ * What a handler adds to its request's log line. Counts and stable codes only: never a title, an
+ * identifier, or anything else a person or the provider wrote.
+ */
+export interface RequestLog {
+  /** Provider items left out of a successful response because the contract cannot carry them. */
+  omittedCount?: number;
+  /** A successful response that is knowingly incomplete, such as a calendar list cut at its bound. */
+  detail?: string;
 }
 
 export interface RouteInput {
@@ -30,6 +41,7 @@ export interface RouteInput {
   readonly body?: unknown;
   readonly originAllowed: boolean;
   readonly authenticated?: AuthenticatedRouteContext;
+  readonly log: RequestLog;
 }
 
 export interface RouterAuthentication {
@@ -42,9 +54,10 @@ export interface RouterAuthentication {
       readonly createdAt: string;
       readonly lastUsedAt: string;
       readonly idleExpiresAt: string;
-      readonly absoluteExpiresAt: string;
       readonly revokedAt: string | null;
     };
+    /** This use began the session's idle period again. */
+    readonly renewed: boolean;
   } | null>;
 }
 
@@ -94,11 +107,17 @@ function parseBearerCredential(request: Request): string | null {
   return result.success ? result.data : null;
 }
 
+interface Authentication {
+  readonly context: AuthenticatedRouteContext;
+  /** Set when a web session's idle period began again: its cookie must outlive it too. */
+  readonly renewedCookie?: string;
+}
+
 async function authenticate(
   request: Request,
   authentication: RouterAuthentication,
   originAllowed: boolean,
-): Promise<AuthenticatedRouteContext> {
+): Promise<Authentication> {
   const transport = request.headers.has("authorization") ? "bearer" : "cookie";
   const credential =
     transport === "bearer" ? parseBearerCredential(request) : parseSessionCookie(request);
@@ -116,12 +135,15 @@ async function authenticate(
     throw new AuthenticationRequiredError();
   }
   const session = Object.freeze({ ...result.session });
-  return Object.freeze({
+  const context = Object.freeze({
     principalId: result.principalId,
     sessionId: session.id,
     transport,
     session,
   });
+  return result.renewed && transport === "cookie"
+    ? { context, renewedCookie: sessionCookie(credential, IDLE_LIFETIME_SECONDS) }
+    : { context };
 }
 
 function parseQuery(url: URL): Record<string, string | string[]> {
@@ -256,10 +278,12 @@ async function dispatch(
   rateLimiters: RateLimiters,
   originAllowed: boolean,
   ctx: ExecutionContext,
+  log: RequestLog,
 ): Promise<Response> {
-  const authenticated = route.definition.authenticated
+  const authentic = route.definition.authenticated
     ? await authenticate(request, authentication, originAllowed)
     : undefined;
+  const authenticated = authentic?.context;
   if (route.definition.rateLimit !== "none") {
     const key =
       authenticated === undefined
@@ -302,6 +326,7 @@ async function dispatch(
     params,
     query: queryResult.data,
     originAllowed,
+    log,
     ...(route.definition.body === undefined ? {} : { body }),
     ...(authenticated === undefined ? {} : { authenticated }),
   });
@@ -312,13 +337,21 @@ async function dispatch(
     const response = noContentResponse();
     if (authenticated?.transport === "cookie" && endsOwnSession(route, params, authenticated)) {
       response.headers.set("set-cookie", CLEARED_SESSION_COOKIE);
+    } else if (authentic?.renewedCookie !== undefined) {
+      response.headers.set("set-cookie", authentic.renewedCookie);
     }
     return response;
   }
   const responseResult = route.definition.response.safeParse(output);
   if (!responseResult.success) throw new Error("Handler response violated its contract");
-  if (responseResult.data instanceof Response) return responseResult.data;
-  return jsonResponse(responseResult.data, route.definition.successStatus);
+  const response =
+    responseResult.data instanceof Response
+      ? responseResult.data
+      : jsonResponse(responseResult.data, route.definition.successStatus);
+  if (authentic?.renewedCookie !== undefined) {
+    response.headers.set("set-cookie", authentic.renewedCookie);
+  }
+  return response;
 }
 
 export function createRouter(
@@ -335,6 +368,8 @@ export function createRouter(
     const started = performance.now();
     let routeName: RouteName | "unmatched" = "unmatched";
     let errorCode: string | null = null;
+    let detail: string | undefined;
+    const log: RequestLog = {};
     let allowedOrigin: string | undefined;
     let response: Response;
     try {
@@ -385,7 +420,9 @@ export function createRouter(
           policy.rateLimiters,
           allowedOrigin !== undefined,
           ctx,
+          log,
         );
+        detail = log.detail;
       }
     } catch (error) {
       if (error instanceof AuthenticationRequiredError) {
@@ -393,6 +430,7 @@ export function createRouter(
         response = errorResponse("authentication_required");
       } else if (error instanceof InvalidInputError || error instanceof ContractError) {
         errorCode = error.code;
+        if (error instanceof ContractError) detail = error.detail;
         response = errorResponse(
           error.code,
           error instanceof ContractError ? error.retryAfterSeconds : undefined,
@@ -421,6 +459,8 @@ export function createRouter(
       duration_ms: Math.round(performance.now() - started),
       error_code: errorCode,
       retry_after: response.headers.get("retry-after"),
+      detail: detail ?? null,
+      omitted_count: log.omittedCount ?? null,
     });
     return response;
   };
