@@ -26,6 +26,8 @@ function timedEvent() {
     transparency: "opaque",
     event_type: "default",
     self_response: null,
+    web_link: null,
+    conference_link: null,
   };
 }
 
@@ -135,6 +137,36 @@ describe("public contract schemas", () => {
       { self_response: undefined },
     ]) {
       expect(EventSchema.safeParse({ ...timedEvent(), ...fields }).success).toBe(false);
+    }
+  });
+
+  it("accepts only credential-free https links of bounded length", () => {
+    for (const field of ["web_link", "conference_link"]) {
+      for (const link of [
+        "https://www.google.com/calendar/event?eid=abc",
+        "https://zoom.example/j/123?pwd=abc",
+        `https://meet.example/${"a".repeat(2_048 - "https://meet.example/".length)}`,
+      ]) {
+        expect(EventSchema.safeParse({ ...timedEvent(), [field]: link }).success, link).toBe(true);
+      }
+      for (const link of [
+        "http://meet.example/room",
+        "javascript:alert(1)",
+        "tel:+15550100",
+        "//meet.example/room",
+        "/room",
+        "",
+        "https://user:secret@meet.example/room",
+        "https://user@meet.example/room",
+        `https://meet.example/${"a".repeat(2_048)}`,
+        undefined,
+        7,
+      ]) {
+        expect(
+          EventSchema.safeParse({ ...timedEvent(), [field]: link }).success,
+          String(link),
+        ).toBe(false);
+      }
     }
   });
 

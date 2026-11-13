@@ -1,4 +1,4 @@
-import { ABSOLUTE_LIFETIME_SECONDS } from "../auth/device-sessions";
+import { IDLE_LIFETIME_SECONDS } from "../auth/device-sessions";
 import {
   OAuthTransactionError,
   type OAuthTransactions,
@@ -80,7 +80,7 @@ async function oauth(
   }
 }
 
-async function calendar(operation: () => Promise<unknown>): Promise<unknown> {
+async function calendar<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
   } catch (error) {
@@ -88,12 +88,16 @@ async function calendar(operation: () => Promise<unknown>): Promise<unknown> {
       if (error.code === "invalid_request") throw new ContractError("invalid_request");
       if (error.code === "permission_denied") throw new ContractError("permission_denied");
       if (error.code === "sync_reset_required") throw new ContractError("sync_reset_required");
-      if (error.code === "not_found") throw new ContractError("resource_not_found");
-      if (error.code === "reconnect" || error.code === "conflict")
-        throw new ContractError("conflict");
-      if (error.code === "rate") throw new ContractError("rate_limited", error.retryAfterSeconds);
+      if (error.code === "not_found")
+        throw new ContractError("resource_not_found", undefined, error.detail);
+      // Only granting access again clears the first; retrying or re-reading clears the second.
+      if (error.code === "reconnect")
+        throw new ContractError("reconnect_required", undefined, error.detail);
+      if (error.code === "conflict") throw new ContractError("conflict", undefined, error.detail);
+      if (error.code === "rate")
+        throw new ContractError("rate_limited", error.retryAfterSeconds, error.detail);
       if (error.code === "unavailable")
-        throw new ContractError("dependency_unavailable", error.retryAfterSeconds);
+        throw new ContractError("dependency_unavailable", error.retryAfterSeconds, error.detail);
     }
     throw error;
   }
@@ -171,7 +175,7 @@ export function createHandlers(env: Env): RouteHandlers {
       if (clientKind !== "web") return { session };
       const { credential, ...webSession } = session;
       const response = jsonResponse(WebSignInRedeemResponseSchema.parse({ session: webSession }));
-      response.headers.set("set-cookie", sessionCookie(credential, ABSOLUTE_LIFETIME_SECONDS));
+      response.headers.set("set-cookie", sessionCookie(credential, IDLE_LIFETIME_SECONDS));
       return response;
     },
     connectStart: (input) =>
@@ -223,7 +227,6 @@ export function createHandlers(env: Env): RouteHandlers {
         device_name: context.session.deviceName,
         created_at: context.session.createdAt,
         idle_expires_at: context.session.idleExpiresAt,
-        absolute_expires_at: context.session.absoluteExpiresAt,
       });
     },
     connections: async (input) => {
@@ -278,29 +281,38 @@ export function createHandlers(env: Env): RouteHandlers {
     },
     calendars: async (input) => {
       const runtime = await configured();
-      return calendar(() =>
+      const { calendars, discovery } = await calendar(() =>
         runtime.liveGoogleCalendar.listCalendars(authenticated(input).principalId),
       );
+      if (discovery !== undefined) {
+        input.log.omittedCount = discovery.omittedCount;
+        if (discovery.truncated) input.log.detail = "calendar_list_truncated";
+      }
+      return { calendars };
     },
     events: async (input) => {
       const runtime = await configured();
-      return calendar(() =>
+      const page = await calendar(() =>
         runtime.liveGoogleCalendar.listEvents(
           authenticated(input).principalId,
           input.params["calendar_id"] ?? "",
           input.query as EventsQuery,
         ),
       );
+      input.log.omittedCount = page.omitted_count;
+      return page;
     },
     changes: async (input) => {
       const runtime = await configured();
-      return calendar(() =>
+      const page = await calendar(() =>
         runtime.liveGoogleCalendar.listChanges(
           authenticated(input).principalId,
           input.params["calendar_id"] ?? "",
           input.query as ChangesQuery,
         ),
       );
+      input.log.omittedCount = page.omitted_count;
+      return page;
     },
     createEvent: async (input, request) => {
       const runtime = await configured();

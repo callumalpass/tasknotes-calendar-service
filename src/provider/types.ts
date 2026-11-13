@@ -76,6 +76,10 @@ interface ProviderEventCommon {
   readonly type: ProviderEventType;
   /** The signed-in person's own answer; absent when they are not an attendee. */
   readonly selfResponse?: ProviderSelfResponse;
+  /** Opens the event in the provider's own web interface. */
+  readonly webLink?: string;
+  /** Joins the event's video conference. */
+  readonly conferenceLink?: string;
   readonly recurrence?: ProviderEventRecurrence;
 }
 

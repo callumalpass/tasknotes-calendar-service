@@ -36,7 +36,6 @@ const validOutputs: Readonly<Record<RouteName, unknown>> = {
       credential,
       session_id: deviceId,
       idle_expires_at: instant,
-      absolute_expires_at: instant,
     },
   },
   connectStart: {
@@ -54,7 +53,6 @@ const validOutputs: Readonly<Record<RouteName, unknown>> = {
     device_name: "Browser",
     created_at: instant,
     idle_expires_at: instant,
-    absolute_expires_at: instant,
   },
   connections: { connections: [] },
   disconnect: undefined,
@@ -92,9 +90,9 @@ function authenticateSuccessfully(value: string) {
             createdAt: instant,
             lastUsedAt: instant,
             idleExpiresAt: instant,
-            absoluteExpiresAt: instant,
             revokedAt: null,
           },
+          renewed: false,
         }
       : null,
   );
@@ -256,6 +254,8 @@ describe("contract router", () => {
       transparency: "opaque",
       event_type: "default",
       self_response: null,
+      web_link: null,
+      conference_link: null,
     };
     const patch = vi.fn<RouteHandler>(() => Promise.resolve(event));
     const remove = vi.fn<RouteHandler>(() => Promise.resolve(undefined));
@@ -521,7 +521,6 @@ describe("contract router", () => {
           createdAt: instant,
           lastUsedAt: instant,
           idleExpiresAt: instant,
-          absoluteExpiresAt: instant,
           revokedAt: null,
         },
       });
@@ -677,6 +676,8 @@ describe("contract router", () => {
       transparency: "opaque",
       event_type: "default",
       self_response: null,
+      web_link: null,
+      conference_link: null,
     };
     const valid = await router(
       handlers({
@@ -743,6 +744,109 @@ describe("contract router", () => {
 
     expect(errorResponse("rate_limited", -10).headers.get("retry-after")).toBe("1");
     expect(errorResponse("invalid_request", 10).headers.get("retry-after")).toBeNull();
+  });
+
+  it("tells access that must be granted again apart from any other conflict", async () => {
+    const path = `/v1/calendars/${id}/events?start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z`;
+    const reconnect = await router(
+      handlers({
+        events: () =>
+          Promise.reject(new ContractError("reconnect_required", undefined, "token_reconnect")),
+      }),
+    )(authenticatedRequest(path));
+    expect(reconnect.status).toBe(409);
+    await expect(reconnect.json()).resolves.toEqual({
+      code: "reconnect_required",
+      message: "Calendar access must be granted again.",
+    });
+    const conflict = await router(
+      handlers({ events: () => Promise.reject(new ContractError("conflict")) }),
+    )(authenticatedRequest(path));
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({ code: "conflict" });
+  });
+
+  it("logs a failure's detail and a handler's counts, and sends neither to the client", async () => {
+    const output = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const path = `/v1/calendars/${id}/events?start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z`;
+    const failed = await router(
+      handlers({
+        events: () =>
+          Promise.reject(new ContractError("dependency_unavailable", 5, "provider_timeout")),
+      }),
+    )(authenticatedRequest(path));
+    expect(await failed.text()).not.toContain("provider_timeout");
+    expect(output.mock.calls.at(-1)?.[0]).toMatchObject({
+      route: "events",
+      status: 503,
+      error_code: "dependency_unavailable",
+      detail: "provider_timeout",
+      omitted_count: null,
+    });
+
+    const listed = await router(
+      handlers({
+        calendars: (input: RouteInput) => {
+          input.log.omittedCount = 3;
+          input.log.detail = "calendar_list_truncated";
+          return Promise.resolve(validOutputs.calendars);
+        },
+      }),
+    )(authenticatedRequest("/v1/calendars"));
+    expect(listed.status).toBe(200);
+    expect(await listed.text()).not.toContain("truncated");
+    expect(output.mock.calls.at(-1)?.[0]).toMatchObject({
+      route: "calendars",
+      status: 200,
+      error_code: null,
+      detail: "calendar_list_truncated",
+      omitted_count: 3,
+    });
+
+    await router()(authenticatedRequest("/v1/calendars"));
+    expect(output.mock.calls.at(-1)?.[0]).toMatchObject({ detail: null, omitted_count: null });
+    output.mockRestore();
+  });
+
+  it("sets a renewed cookie only for a cookie session whose use renewed it", async () => {
+    const renewing = (
+      renewed: boolean,
+      clientKind: "web" | "obsidian" = "web",
+    ): RouterAuthentication => ({
+      authenticate: async (value) => {
+        const result = await authenticateSuccessfully(value);
+        return result === null
+          ? null
+          : { ...result, session: { ...result.session, clientKind }, renewed };
+      },
+    });
+    const cookie = { cookie: `__Host-tasknotes_session=${credential}` };
+    const dispatch = (authentication: RouterAuthentication, headers: Record<string, string>) =>
+      createRouter(handlers(), authentication, {
+        rateLimiters: {
+          ip: (env as unknown as Env).IP_RATE_LIMITER,
+          principal: (env as unknown as Env).PRINCIPAL_RATE_LIMITER,
+        },
+        allowedOrigins: () => ["https://app.test"],
+        publicOrigin: () => "https://calendar.test",
+      })(
+        new Request("https://calendar.test/v1/session", {
+          headers: { origin: "https://app.test", ...headers },
+        }),
+        createExecutionContext(),
+      );
+
+    const renewedCookie = await dispatch(renewing(true), cookie);
+    expect(renewedCookie.status).toBe(200);
+    expect(renewedCookie.headers.get("set-cookie")).toBe(
+      `__Host-tasknotes_session=${credential}; Max-Age=2592000; Path=/; Secure; HttpOnly; SameSite=Strict`,
+    );
+    expect((await dispatch(renewing(false), cookie)).headers.get("set-cookie")).toBeNull();
+    const bearer = await dispatch(renewing(true, "obsidian"), {
+      authorization: `Bearer ${credential}`,
+    });
+    expect(bearer.status).toBe(200);
+    expect(bearer.headers.get("set-cookie")).toBeNull();
   });
 
   it("returns no body and privacy headers for destructive routes", async () => {

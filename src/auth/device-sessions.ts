@@ -12,11 +12,16 @@ const CREDENTIAL_VERSION = "v1";
 const SESSION_ID_BYTES = 16;
 const CREDENTIAL_SECRET_BYTES = 32;
 const DIGEST_BYTES = 32;
-const IDLE_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
-export const ABSOLUTE_LIFETIME_SECONDS = 90 * 24 * 60 * 60;
+/** A session lives while it is used: each use, at most hourly, starts this period again. */
+export const IDLE_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
 const LAST_USED_UPDATE_INTERVAL_SECONDS = 60 * 60;
 export const MAX_ACTIVE_DEVICE_SESSIONS = 100;
 const MAX_PRINCIPAL_ID_BYTES = 256;
+// `absolute_expires_at` is retired (ADR 0008) and never read. It is still written, equal to
+// `idle_expires_at`, because the column is NOT NULL and the Worker before ADR 0008 reads it, which
+// keeps a Worker rollback sound. A later migration drops it.
+const SESSION_COLUMNS = `id, principal_id, credential_hash, device_name, client_kind, created_at,
+  last_used_at, idle_expires_at, revoked_at`;
 const textEncoder = new TextEncoder();
 
 export interface Clock {
@@ -45,7 +50,6 @@ export interface DeviceSessionMetadata {
   readonly createdAt: string;
   readonly lastUsedAt: string;
   readonly idleExpiresAt: string;
-  readonly absoluteExpiresAt: string;
   readonly revokedAt: string | null;
 }
 
@@ -56,6 +60,8 @@ export interface CreatedDeviceSession extends DeviceSessionMetadata {
 export interface AuthenticatedDeviceSession {
   readonly principalId: string;
   readonly session: DeviceSessionMetadata;
+  /** This request started the idle period again, so a cookie holding the session is due the same. */
+  readonly renewed: boolean;
 }
 
 interface SessionRow {
@@ -67,7 +73,6 @@ interface SessionRow {
   created_at: number;
   last_used_at: number;
   idle_expires_at: number;
-  absolute_expires_at: number;
   revoked_at: number | null;
 }
 
@@ -84,7 +89,6 @@ interface MetadataRow {
   created_at: number;
   last_used_at: number;
   idle_expires_at: number;
-  absolute_expires_at: number;
   revoked_at: number | null;
 }
 
@@ -186,7 +190,6 @@ function metadata(row: MetadataRow | SessionRow): DeviceSessionMetadata {
     createdAt: toIso(row.created_at),
     lastUsedAt: toIso(row.last_used_at),
     idleExpiresAt: toIso(row.idle_expires_at),
-    absoluteExpiresAt: toIso(row.absolute_expires_at),
     revokedAt: row.revoked_at === null ? null : toIso(row.revoked_at),
   };
 }
@@ -218,7 +221,6 @@ export class DeviceSessions {
     const now = validatedNow(this.#clock);
     const generated = await generateCredential(this.#pepper, this.#random);
     const idleExpiresAt = now + IDLE_LIFETIME_SECONDS;
-    const absoluteExpiresAt = now + ABSOLUTE_LIFETIME_SECONDS;
 
     const insert = this.#db
       .prepare(
@@ -243,10 +245,9 @@ export class DeviceSessions {
           AND (SELECT COUNT(*) FROM device_sessions AS active_session
                WHERE active_session.principal_id = transaction_record.authorized_principal_id
                  AND active_session.revoked_at IS NULL
-                 AND active_session.idle_expires_at > ?
-                 AND active_session.absolute_expires_at > ?) < ?
+                 AND active_session.idle_expires_at > ?) < ?
         RETURNING id, device_name, client_kind, created_at, last_used_at,
-                  idle_expires_at, absolute_expires_at, revoked_at`,
+                  idle_expires_at, revoked_at`,
       )
       .bind(
         generated.id,
@@ -254,14 +255,13 @@ export class DeviceSessions {
         now,
         now,
         idleExpiresAt,
-        absoluteExpiresAt,
+        idleExpiresAt,
         input.transactionId,
         input.expectedPollingDigest,
         input.expectedTasknotesPkceChallenge,
         input.expectedConfirmationDigest,
         now,
         input.webOriginAllowed ? 1 : 0,
-        now,
         now,
         MAX_ACTIVE_DEVICE_SESSIONS,
       );
@@ -326,7 +326,7 @@ export class DeviceSessions {
     const row = await this.#db
       .prepare(
         `SELECT s.id, s.principal_id, s.credential_hash, s.device_name, s.client_kind,
-                s.created_at, s.last_used_at, s.idle_expires_at, s.absolute_expires_at, s.revoked_at
+                s.created_at, s.last_used_at, s.idle_expires_at, s.revoked_at
          FROM device_sessions s
          JOIN principals p ON p.id = s.principal_id
          WHERE s.id = ?
@@ -352,54 +352,56 @@ export class DeviceSessions {
     }
 
     const now = validatedNow(this.#clock);
-    if (row.revoked_at !== null || now >= row.idle_expires_at || now >= row.absolute_expires_at) {
+    if (row.revoked_at !== null || now >= row.idle_expires_at) {
       return null;
     }
 
     let authenticatedRow = row;
+    let renewed = false;
     if (now - row.last_used_at >= LAST_USED_UPDATE_INTERVAL_SECONDS) {
       const lastUsedAt = now;
-      const idleExpiresAt = Math.min(now + IDLE_LIFETIME_SECONDS, row.absolute_expires_at);
+      const idleExpiresAt = now + IDLE_LIFETIME_SECONDS;
       const update = await this.#db
         .prepare(
           `UPDATE device_sessions
-           SET last_used_at = ?, idle_expires_at = ?
+           SET last_used_at = ?, idle_expires_at = ?, absolute_expires_at = ?
            WHERE id = ? AND principal_id = ? AND revoked_at IS NULL
-             AND idle_expires_at > ? AND absolute_expires_at > ?
+             AND idle_expires_at > ?
              AND last_used_at <= ?
              AND EXISTS (
                SELECT 1 FROM principals p
                WHERE p.id = device_sessions.principal_id
              )
-           RETURNING *`,
+           RETURNING ${SESSION_COLUMNS}`,
         )
         .bind(
           lastUsedAt,
           idleExpiresAt,
+          idleExpiresAt,
           row.id,
           row.principal_id,
-          lastUsedAt,
           lastUsedAt,
           now - LAST_USED_UPDATE_INTERVAL_SECONDS,
         )
         .first<SessionRow>();
       if (update !== null) {
         authenticatedRow = update;
+        renewed = true;
       } else {
         const current = await this.#db
           .prepare(
-            `SELECT s.* FROM device_sessions s JOIN principals p ON p.id = s.principal_id
-           WHERE s.id = ? AND s.principal_id = ? AND s.revoked_at IS NULL
-             AND s.idle_expires_at > ? AND s.absolute_expires_at > ?`,
+            `SELECT ${SESSION_COLUMNS} FROM device_sessions
+             WHERE id = ? AND principal_id = ? AND revoked_at IS NULL AND idle_expires_at > ?
+               AND EXISTS (SELECT 1 FROM principals p WHERE p.id = device_sessions.principal_id)`,
           )
-          .bind(row.id, row.principal_id, now, now)
+          .bind(row.id, row.principal_id, now)
           .first<SessionRow>();
         if (current === null) return null;
         authenticatedRow = current;
       }
     }
 
-    return { principalId: row.principal_id, session: metadata(authenticatedRow) };
+    return { principalId: row.principal_id, session: metadata(authenticatedRow), renewed };
   }
 
   public async list(principalId: string): Promise<readonly DeviceSessionMetadata[]> {
@@ -408,15 +410,15 @@ export class DeviceSessions {
     const result = await this.#db
       .prepare(
         `SELECT s.id, s.device_name, s.client_kind, s.created_at, s.last_used_at,
-                s.idle_expires_at, s.absolute_expires_at, s.revoked_at
+                s.idle_expires_at, s.revoked_at
          FROM device_sessions s
          JOIN principals p ON p.id = s.principal_id
          WHERE s.principal_id = ? AND s.revoked_at IS NULL
-           AND s.idle_expires_at > ? AND s.absolute_expires_at > ?
+           AND s.idle_expires_at > ?
          ORDER BY s.created_at DESC, s.id DESC
          LIMIT ?`,
       )
-      .bind(principalId, now, now, MAX_ACTIVE_DEVICE_SESSIONS)
+      .bind(principalId, now, MAX_ACTIVE_DEVICE_SESSIONS)
       .all<MetadataRow>();
     return result.results.map(metadata);
   }

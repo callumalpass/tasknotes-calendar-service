@@ -16,6 +16,7 @@ const ERROR_DEFINITIONS = {
   resource_not_found: { status: 404, message: "Resource not found." },
   sync_reset_required: { status: 410, message: "Calendar sync must be restarted." },
   conflict: { status: 409, message: "Request conflicts with current state." },
+  reconnect_required: { status: 409, message: "Calendar access must be granted again." },
   rate_limited: { status: 429, message: "Too many requests." },
   dependency_unavailable: { status: 503, message: "Service is temporarily unavailable." },
   internal_error: { status: 500, message: "An internal error occurred." },
@@ -55,12 +56,15 @@ export function errorResponse(code: ErrorCode, retryAfterSeconds?: number): Resp
 export class ContractError extends Error {
   readonly code: ErrorCode;
   readonly retryAfterSeconds: number | undefined;
+  /** For the request log only: which provider or token step failed. Never sent to the client. */
+  readonly detail: string | undefined;
 
-  constructor(code: ErrorCode, retryAfterSeconds?: number) {
+  constructor(code: ErrorCode, retryAfterSeconds?: number, detail?: string) {
     super(ERROR_DEFINITIONS[code].message);
     this.name = "ContractError";
     this.code = code;
     this.retryAfterSeconds = retryAfterSeconds;
+    this.detail = detail;
   }
 }
 

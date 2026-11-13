@@ -21,7 +21,9 @@ uncertain refresh for the same token version.
 Calendar discovery uses a separate 45-second D1 lease because repeating its bounded GET is safe.
 Only one complete terminal page of at most 250 calendars atomically upserts stable opaque mappings,
 deletes absent mappings, advances `discovery_version`, and releases the lease. Nonterminal,
-malformed, stale, or unauthorized results cannot partially mutate mappings.
+malformed, stale, or unauthorized results cannot partially mutate mappings. ADR 0008 replaces the
+single page with a list read to its end, up to 1,000 calendars, and leaves out a calendar it cannot
+represent instead of failing the list.
 
 Event reads authorize the public calendar before opening an authenticated cursor and before token or
 provider access. Cursors bind principal, connection generation, public calendar, exact range, and

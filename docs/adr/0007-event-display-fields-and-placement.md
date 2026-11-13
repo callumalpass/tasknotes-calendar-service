@@ -44,7 +44,7 @@ entry, the person's own whenever an event has more than one attendee, and of it 
 properties. An event with a single attendee who is not the person yields that attendee's answer
 without their identity; the service discards it. No attendee name, email, comment, or count is
 requested, returned, or logged. Organizers, conference links, HTML links, and raw recurrence rules
-stay excluded.
+stay excluded. ADR 0008 later adds the two links.
 
 These fields are display metadata. A value the service cannot use reads as `default` or `null` and
 does not omit the event. The write contract is unchanged: none of them can be set through the

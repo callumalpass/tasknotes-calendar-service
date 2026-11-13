@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import spec from "../../openapi/v1.yaml?raw";
 import {
   CLIENT_KINDS,
+  ErrorCodeSchema,
+  MAX_CALENDARS,
   MAX_CURSOR_LENGTH,
   MAX_JSON_BODY_BYTES,
   MAX_RANGE_DAYS,
@@ -54,7 +56,13 @@ describe("OpenAPI and runtime contract", () => {
   });
 
   it("documents calendar display data and the event display fields on every variant", () => {
-    for (const field of ["transparency", "event_type", "self_response"]) {
+    for (const field of [
+      "transparency",
+      "event_type",
+      "self_response",
+      "web_link",
+      "conference_link",
+    ]) {
       expect(spec.match(new RegExp(`^ {8}${field}: \\{ \\$ref: `, "gm"))).toHaveLength(4);
       expect(spec.match(new RegExp(`^ {10}${field},$`, "gm"))).toHaveLength(4);
     }
@@ -64,6 +72,10 @@ describe("OpenAPI and runtime contract", () => {
     );
     expect(spec).toContain("enum: [accepted, declined, tentative, needs_action, null]");
     expect(spec).toContain("No other attendee is read.");
+    expect(spec).toContain("Dial-in numbers and access codes are not read.");
+    expect(spec).toContain(`maxItems: ${MAX_CALENDARS}`);
+    expect(spec).not.toContain("absolute_expires_at");
+    for (const code of ErrorCodeSchema.options) expect(spec).toContain(`${code},`);
     expect(spec).toContain('pattern: "^#[0-9a-f]{6}$"');
     expect(spec).toContain("can_write, time_zone, is_primary, is_selected, color]");
   });

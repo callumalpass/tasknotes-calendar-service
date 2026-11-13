@@ -19,7 +19,7 @@ const MAX_PAGE_TOKEN_BYTES = 1_024;
 const CALENDAR_LIST_FIELDS =
   "nextPageToken,items(id,summary,summaryOverride,description,timeZone,accessRole,primary,selected,backgroundColor)";
 const EVENTS_FIELDS =
-  "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))";
+  "nextPageToken,items(id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),htmlLink,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone))";
 const STATIC_ACCESS_TOKEN = "fake-access";
 const INITIAL_REFRESH_TOKEN = "fake-refresh-token-000000000000000000001";
 const encoder = new TextEncoder();
@@ -860,9 +860,9 @@ function validCalendarItem(value: unknown): value is Record<string, unknown> {
     optionalString(value["timeZone"], 256) &&
     optionalString(value["summaryOverride"], 2_048) &&
     optionalString(value["backgroundColor"], 64) &&
-    ["freeBusyReader", "reader", "writerWithoutPrivateAccess", "writer", "owner"].includes(
-      String(value["accessRole"]),
-    ) &&
+    // Any role, so a test can offer one the service does not know.
+    typeof value["accessRole"] === "string" &&
+    /^[A-Za-z]{1,64}$/u.test(value["accessRole"]) &&
     (value["primary"] === undefined || typeof value["primary"] === "boolean") &&
     (value["selected"] === undefined || typeof value["selected"] === "boolean")
   );
@@ -881,6 +881,9 @@ function validEventItem(value: unknown): value is Record<string, unknown> {
       "transparency",
       "eventType",
       "attendees",
+      "htmlLink",
+      "hangoutLink",
+      "conferenceData",
       "start",
       "end",
       "recurringEventId",
@@ -899,6 +902,9 @@ function validEventItem(value: unknown): value is Record<string, unknown> {
     optionalString(value["recurringEventId"], 4_096) &&
     optionalString(value["eventType"], 64) &&
     (value["attendees"] === undefined || Array.isArray(value["attendees"])) &&
+    optionalString(value["htmlLink"], 8_192) &&
+    optionalString(value["hangoutLink"], 8_192) &&
+    (value["conferenceData"] === undefined || typeof value["conferenceData"] === "object") &&
     (value["transparency"] === undefined ||
       value["transparency"] === "opaque" ||
       value["transparency"] === "transparent") &&

@@ -31,6 +31,8 @@ const MAX_CALENDAR_DESCRIPTION_CHARACTERS = 4_000;
 const MAX_CALENDAR_TIME_ZONE_CHARACTERS = 100;
 const PRINTABLE_PAGE_TOKEN_PATTERN = /^[\u0020-\u007e]+$/u;
 const CALENDAR_COLOR_PATTERN = /^#[0-9a-f]{6}$/iu;
+const MAX_LINK_CHARACTERS = 2_048;
+const WEB_LINK_HOSTS: ReadonlySet<string> = new Set(["www.google.com", "calendar.google.com"]);
 const MAX_RETRY_AFTER_SECONDS = 3_600;
 const MAX_EVENT_RANGE_MS = 93 * 24 * 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -590,12 +592,8 @@ function boundary(value: unknown): ProviderEventBoundary | undefined {
   const dateTime = value["dateTime"];
   const zone = timeZone(value["timeZone"]);
 
-  if (
-    typeof date === "string" &&
-    dateTime === undefined &&
-    (zone === undefined || zone === null) &&
-    validDate(date)
-  ) {
+  // A date has no zone. Google sends one beside the dates of some recurring all-day events.
+  if (typeof date === "string" && dateTime === undefined && validDate(date)) {
     return { kind: "all_day", date } satisfies ProviderAllDayBoundary;
   }
   if (date === undefined && typeof dateTime === "string" && validDateTime(dateTime)) {
@@ -644,6 +642,33 @@ function selfResponse(value: unknown): ProviderSelfResponse | undefined {
   return undefined;
 }
 
+/** Display metadata: a link the service cannot vouch for is dropped, never passed on. */
+function httpsLink(value: unknown, hosts?: ReadonlySet<string>): string | undefined {
+  if (typeof value !== "string" || value.length > MAX_LINK_CHARACTERS) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "") return undefined;
+  if (hosts !== undefined && !hosts.has(url.hostname)) return undefined;
+  return url.href.length <= MAX_LINK_CHARACTERS ? url.href : undefined;
+}
+
+/** The video entry of the event's conference, whoever provides it; Meet's own link otherwise. */
+function conferenceLink(value: Record<string, unknown>): string | undefined {
+  const conference = value["conferenceData"];
+  if (isRecord(conference) && Array.isArray(conference["entryPoints"])) {
+    for (const entry of conference["entryPoints"]) {
+      if (!isRecord(entry) || entry["entryPointType"] !== "video") continue;
+      const link = httpsLink(entry["uri"]);
+      if (link !== undefined) return link;
+    }
+  }
+  return httpsLink(value["hangoutLink"]);
+}
+
 function normalizeEvent(value: unknown, allowIdOnly = false): ProviderEvent | undefined {
   if (!isRecord(value)) return undefined;
   const id = boundedString(value["id"], 1024);
@@ -672,6 +697,8 @@ function normalizeEvent(value: unknown, allowIdOnly = false): ProviderEvent | un
       ? (EVENT_TYPES[providerType] ?? "default")
       : "default";
   const response = selfResponse(value["attendees"]);
+  const webLink = httpsLink(value["htmlLink"], WEB_LINK_HOSTS);
+  const joinLink = conferenceLink(value);
   const recurringEventId =
     value["recurringEventId"] === undefined
       ? undefined
@@ -710,6 +737,8 @@ function normalizeEvent(value: unknown, allowIdOnly = false): ProviderEvent | un
     transparency,
     type,
     ...(response === undefined ? {} : { selfResponse: response }),
+    ...(webLink === undefined ? {} : { webLink }),
+    ...(joinLink === undefined ? {} : { conferenceLink: joinLink }),
     ...(title === undefined ? {} : { title }),
     ...(description === undefined ? {} : { description }),
     ...(location === undefined ? {} : { location }),
@@ -790,7 +819,9 @@ export async function listGoogleCalendarsPage(
     return invalidRequest();
   }
   const result = await jsonRequest(url, { method: "GET", headers }, request, "calendar");
-  return result.ok ? normalizePage(result.value, request.pageToken, normalizeCalendar) : result;
+  return result.ok
+    ? normalizePage(result.value, request.pageToken, normalizeCalendar, true)
+    : result;
 }
 
 export async function listGoogleEventsPage(
@@ -835,7 +866,7 @@ export async function listGoogleEventsPage(
 }
 
 const EVENT_FIELDS =
-  "id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone)";
+  "id,etag,status,updated,summary,description,location,transparency,eventType,attendees(self,responseStatus),htmlLink,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),start(date,dateTime,timeZone),end(date,dateTime,timeZone),recurringEventId,originalStartTime(date,dateTime,timeZone)";
 /** With more attendees than this, Google returns only the person's own entry. */
 const MAX_ATTENDEES = "1";
 const EVENTS_FIELDS = `nextPageToken,items(${EVENT_FIELDS})`;

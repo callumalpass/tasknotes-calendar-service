@@ -63,6 +63,7 @@ export const ErrorCodeSchema = z.enum([
   "permission_denied",
   "resource_not_found",
   "conflict",
+  "reconnect_required",
   "sync_reset_required",
   "rate_limited",
   "dependency_unavailable",

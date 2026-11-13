@@ -541,6 +541,20 @@ describe("Worker HTTP OAuth and account slice", () => {
       expect(body).toContain(code);
       expect(body).not.toContain("failure-private-calendar");
     }
+
+    // Lapsed access is told apart from every other conflict, for the list and for one calendar.
+    await bindings.DB.prepare(
+      `UPDATE connections SET status = 'reconnect_required',
+         updated_at = MAX(unixepoch(), updated_at)`,
+    ).run();
+    for (const path of ["/v1/calendars", `/v1/calendars/${calendarId}/events?${range}`]) {
+      const response = await api(path, {}, signedIn.credential);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: "reconnect_required",
+        message: "Calendar access must be granted again.",
+      });
+    }
   });
 
   it("lists and principal-binds devices, then account deletion invalidates the credential", async () => {

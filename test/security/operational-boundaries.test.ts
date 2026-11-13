@@ -339,7 +339,12 @@ describe("router operational boundaries in workerd", () => {
       subject: "canary-google-subject",
       email: "canary@example.test",
       calendarPages: [
-        { items: [{ id: providerId, summary: "canary-calendar-title", accessRole: "owner" }] },
+        {
+          items: [
+            { id: providerId, summary: "canary-calendar-title", accessRole: "owner" },
+            { id: "canary-unknown-role", summary: "canary-omitted-title", accessRole: "curator" },
+          ],
+        },
       ],
       eventPages: [
         {
@@ -351,8 +356,18 @@ describe("router operational boundaries in workerd", () => {
               summary: title,
               status: "confirmed",
               updated: "2026-01-01T00:00:00Z",
+              htmlLink: "https://www.google.com/calendar/event?eid=canary-web-link",
+              hangoutLink: "https://meet.google.com/canary-join-link",
               start: { date: "2026-01-01" },
               end: { date: "2026-01-02" },
+            },
+            {
+              id: "canary-unreadable-event-id",
+              etag: '"1"',
+              status: "confirmed",
+              updated: "2026-01-01T00:00:00Z",
+              start: { date: "2026-01-01" },
+              end: { dateTime: "2026-01-02T00:00:00Z" },
             },
           ],
         },
@@ -370,7 +385,10 @@ describe("router operational boundaries in workerd", () => {
     const path = `/v1/calendars/${calendarId}/events?start=2026-01-01T00%3A00%3A00Z&end=2026-01-02T00%3A00%3A00Z`;
     const events = await send(path, { headers });
     expect(events.status).toBe(200);
-    expect(await events.text()).toContain(title);
+    const read = await events.text();
+    expect(read).toContain(title);
+    expect(read).toContain("canary-web-link");
+    expect(read).toContain("canary-join-link");
     await configure({ calendar: "server_error" });
     const failed = await send(path, { headers });
     expect(failed.status).toBe(503);
@@ -383,6 +401,11 @@ describe("router operational boundaries in workerd", () => {
       "canary-google-subject",
       "canary@example.test",
       "canary-calendar-title",
+      "canary-unknown-role",
+      "canary-omitted-title",
+      "canary-unreadable-event-id",
+      "canary-web-link",
+      "canary-join-link",
       "canary-device",
       credential,
       verifier,
@@ -414,6 +437,19 @@ describe("router operational boundaries in workerd", () => {
       duration_ms: expect.any(Number) as unknown,
       error_code: "dependency_unavailable",
       retry_after: failed.headers.get("retry-after"),
+      detail: "provider_unavailable",
+      omitted_count: null,
+    });
+    const logged = output.mock.calls.map(([line]) => line as Record<string, unknown>);
+    expect(logged.find((line) => line["route"] === "calendars")).toMatchObject({
+      status: 200,
+      detail: null,
+      omitted_count: 1,
+    });
+    expect(logged.find((line) => line["route"] === "events")).toMatchObject({
+      status: 200,
+      detail: null,
+      omitted_count: 1,
     });
     expect(errors).not.toHaveBeenCalled();
   });

@@ -58,7 +58,8 @@ export interface FakeCalendarFixture {
   summary: string;
   description?: string;
   timeZone?: string;
-  accessRole: "freeBusyReader" | "reader" | "writer" | "owner";
+  /** Google's roles, or any other word to stand for one the service does not know. */
+  accessRole: string;
   primary?: boolean;
   selected?: boolean;
 }
@@ -78,6 +79,9 @@ export interface FakeEventFixture {
   description?: string;
   location?: string;
   transparency?: "opaque" | "transparent";
+  htmlLink?: string;
+  hangoutLink?: string;
+  conferenceData?: { entryPoints?: { entryPointType?: string; uri?: string }[] };
   start?: FakeEventBoundary;
   end?: FakeEventBoundary;
   recurringEventId?: string;
