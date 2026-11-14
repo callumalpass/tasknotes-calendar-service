@@ -37,6 +37,25 @@ limiting, and hourly cleanup. Calendar mappings are durable opaque identifiers; 
 provider event identifiers are never persisted. Provider pagination and sync tokens are returned
 only inside authenticated cursors.
 
+## Client package
+
+`client/` is `@tasknotes/calendar-service-client`, the client the TaskNotes app and the TaskNotes
+Obsidian plugin use. See its [README](client/README.md) and
+[ADR 0009](docs/adr/0009-published-client-package.md).
+
+```bash
+pnpm client:build
+pnpm test:unit
+pnpm test:e2e
+```
+
+`pnpm client:build` writes `client/dist`. The unit tests cover the client against a stand-in
+transport, and `test/e2e/client.test.ts` drives it against the Worker.
+
+To publish, set the version in `client/package.json`, merge, and push a tag `client-v<version>`. The
+[publish workflow](.github/workflows/publish-client.yml) runs CI and publishes with npm trusted
+publishing. Publishing the package does not deploy the Worker.
+
 ## Isolated LAB
 
 The non-production Worker reserves `https://tasknotes-calendar-lab.callumalpass.workers.dev`. Its

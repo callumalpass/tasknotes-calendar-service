@@ -4,7 +4,15 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["coverage/**", "dist/**", ".wrangler/**", "eslint.config.js", "prettier.config.mjs"],
+    ignores: [
+      "coverage/**",
+      "dist/**",
+      "client/dist/**",
+      "client/build.mjs",
+      ".wrangler/**",
+      "eslint.config.js",
+      "prettier.config.mjs",
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked,

@@ -1,0 +1,40 @@
+{
+  "name": "@tasknotes/calendar-service-client",
+  "version": "0.1.0",
+  "description": "Client for the TaskNotes Calendar Service: sign-in, calendar discovery, and event reads and writes for TaskNotes front ends.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/callumalpass/tasknotes-calendar-service.git",
+    "directory": "client"
+  },
+  "bugs": {
+    "url": "https://github.com/callumalpass/tasknotes-calendar-service/issues"
+  },
+  "homepage": "https://github.com/callumalpass/tasknotes-calendar-service/tree/main/client#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "peerDependencies": {
+    "zod": "^3.25.0 || ^4.0.0"
+  }
+}
