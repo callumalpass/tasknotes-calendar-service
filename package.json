@@ -26,7 +26,8 @@
     "migrations:production": "wrangler d1 migrations apply tasknotes-calendar-production --remote --env production",
     "deploy:dry-run": "wrangler deploy --env=\"\" --dry-run --outdir dist/worker",
     "deploy:lab:dry-run": "wrangler deploy --env lab --dry-run --outdir dist/worker-lab",
-    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test:security && pnpm test:coverage && pnpm deploy:dry-run"
+    "client:build": "node client/build.mjs",
+    "verify": "pnpm format:check && pnpm typecheck && pnpm lint && pnpm test:security && pnpm test:coverage && pnpm deploy:dry-run && pnpm client:build"
   },
   "dependencies": {
     "jose": "6.1.0",
