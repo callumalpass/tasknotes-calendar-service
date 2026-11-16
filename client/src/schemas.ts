@@ -1,5 +1,7 @@
-// The subpath is the one entry point both zod 3.25 and zod 4 provide.
-import { z } from "zod/v4";
+// The subpath is the one entry point both zod 3.25 and zod 4 provide. The namespace import lets
+// bundlers drop the zod exports this package does not use; `import { z }` keeps all of them,
+// locales included.
+import * as z from "zod/v4";
 
 export const id = z.uuid();
 export const eventId = z.string().regex(/^e1_[A-Za-z0-9_-]+$/);

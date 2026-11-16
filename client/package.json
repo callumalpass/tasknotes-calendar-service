@@ -1,6 +1,6 @@
 {
   "name": "@tasknotes/calendar-service-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Client for the TaskNotes Calendar Service: sign-in, calendar discovery, and event reads and writes for TaskNotes front ends.",
   "license": "MIT",
   "repository": {
