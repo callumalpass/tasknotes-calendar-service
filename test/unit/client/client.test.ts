@@ -603,7 +603,7 @@ describe("CalendarServiceClient", () => {
     expect(defaultSelection([hidden, shown, primary])).toEqual([primary.id, shown.id]);
     // An older service says nothing about what Google shows.
     expect(defaultSelection([calendar("Team"), primary])).toEqual([primary.id]);
-    const many = Array.from({ length: 8 }, (_, index) =>
+    const many = Array.from({ length: MAX_SELECTED_CALENDARS + 3 }, (_, index) =>
       calendar(`Shown ${index}`, { is_selected: true }),
     );
     expect(defaultSelection([...many, primary])).toEqual([

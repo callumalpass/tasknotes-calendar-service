@@ -29,7 +29,7 @@ const SIGNED_IN_KEY = "tasknotes:google-calendar-signed-in:v1";
 const MAX_RANGE_MS = 93 * 86_400_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_PAGES_PER_RANGE = 20;
-export const MAX_SELECTED_CALENDARS = 5;
+export const MAX_SELECTED_CALENDARS = 10;
 
 /** Where the client keeps what it may forget: a selection and a signed-in flag. */
 export interface KeyValueStore {
