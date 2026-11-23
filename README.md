@@ -112,7 +112,5 @@ several queries. A response's `cf-placement` header shows where it ran. LAB is n
 
 See:
 
-- [`PRODUCT.md`](PRODUCT.md)
-- [`DESIGN.md`](DESIGN.md)
 - [`AGENTS.md`](AGENTS.md)
 - [`docs/adr/`](docs/adr/)
