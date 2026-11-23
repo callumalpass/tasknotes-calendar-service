@@ -39,8 +39,8 @@ over silent recovery, and simplification over expansion.
 
 ## Development discipline
 
-- Read the relevant ADR before changing a public, persisted,
-  configured, security-sensitive, or user-facing contract.
+- Read the relevant ADR before changing a public, persisted, configured, security-sensitive, or
+  user-facing contract.
 - Stay Google-only and within the stateless write proxy of ADR 0005. Do not add Microsoft,
   persistent event mirroring, server-side sync, or mdbase materialization until their ADR gate is
   accepted.
